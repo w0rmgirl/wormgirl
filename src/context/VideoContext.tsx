@@ -12,9 +12,11 @@ interface VideoState {
   currentTime: number
   duration: number
   isLoading: boolean
-  queuedModuleIndex: number | null
   // Signal for IntroOverlay: prelude was requested from intro, wait for intro video to finish
   pendingPreludeFromIntro: boolean
+  // Signal for VideoPlayerStacked: sequential-forward target was clicked from idle.
+  // Defer the cut to the end of the current loop iteration so it lands on the loop boundary.
+  pendingSequentialTarget: number | null
 }
 
 type VideoAction =
@@ -25,8 +27,8 @@ type VideoAction =
   | { type: 'SET_TIME'; payload: number }
   | { type: 'SET_DURATION'; payload: number }
   | { type: 'SET_LOADING'; payload: boolean }
-  | { type: 'QUEUE_MODULE'; payload: number | null }
   | { type: 'SET_PENDING_PRELUDE'; payload: boolean }
+  | { type: 'SET_PENDING_SEQUENTIAL'; payload: number | null }
 
 interface VideoContextType {
   state: VideoState
@@ -37,7 +39,8 @@ interface VideoContextType {
   enterIdleMode: () => void
   exitIdleMode: () => void
   // Ref shared between IntroOverlay and callers (Sidebar, MobileModuleBar) —
-  // set synchronously before playModule(0) to prevent idle-loop seek-back race
+  // set synchronously before playModule(0) so IntroOverlay can defer the prelude
+  // dispatch until its main clip ends naturally.
   introPreludeRef: React.MutableRefObject<boolean>
 }
 
@@ -51,8 +54,8 @@ const initialState: VideoState = {
   currentTime: 0,
   duration: 0,
   isLoading: true,
-  queuedModuleIndex: null,
   pendingPreludeFromIntro: false,
+  pendingSequentialTarget: null,
 }
 
 // Reducer
@@ -64,8 +67,8 @@ function videoReducer(state: VideoState, action: VideoAction): VideoState {
         currentModuleIndex: action.payload,
         isIdle: false,
         currentTime: 0,
-        queuedModuleIndex: null,
         pendingPreludeFromIntro: false,
+        pendingSequentialTarget: null,
       }
     case 'PLAY':
       return { ...state, isPlaying: true }
@@ -79,10 +82,10 @@ function videoReducer(state: VideoState, action: VideoAction): VideoState {
       return { ...state, duration: action.payload }
     case 'SET_LOADING':
       return { ...state, isLoading: action.payload }
-    case 'QUEUE_MODULE':
-      return { ...state, queuedModuleIndex: action.payload }
     case 'SET_PENDING_PRELUDE':
       return { ...state, pendingPreludeFromIntro: action.payload }
+    case 'SET_PENDING_SEQUENTIAL':
+      return { ...state, pendingSequentialTarget: action.payload }
     default:
       return state
   }
@@ -97,58 +100,48 @@ export function VideoProvider({ children }: { children: ReactNode }) {
   const introPreludeRef = useRef(false)
 
   const playModule = (index: number) => {
-    // If the selected module is already the current one and we are in idle mode,
-    // keep looping the idle video instead of restarting the main video.
+    // Same module + currently idle → keep looping (no-op)
     if (index === state.currentModuleIndex && state.isIdle) {
       return
     }
 
-    // Special handling while the current video is looping its idle clip
-    if (state.isIdle) {
-      // From the intro (-1) — IntroOverlay handles the transition
-      if (state.currentModuleIndex === -1) {
-        // For prelude (index 0): don't dispatch SET_MODULE yet — IntroOverlay waits for
-        // the intro video to finish, then dispatches SET_MODULE + PLAY itself.
-        // Dispatching now would make VideoPlayerStacked show/play the prelude immediately.
-        if (index === 0) {
-          introPreludeRef.current = true
-          dispatch({ type: 'SET_PENDING_PRELUDE', payload: true })
-          return
-        }
-        dispatch({ type: 'SET_MODULE', payload: index })
+    // From intro (-1)
+    if (state.currentModuleIndex === -1) {
+      if (index === 0) {
+        // Prelude: defer to IntroOverlay, which waits for intro main to end
+        // (or the current loop iteration to finish) before dispatching SET_MODULE.
+        introPreludeRef.current = true
+        dispatch({ type: 'SET_PENDING_PRELUDE', payload: true })
         return
       }
-
-      const current = state.currentModuleIndex
-
-      // Clicking the SAME module: keep looping its idle clip (no changes)
-      if (index === current) {
-        return
-      }
-
-      const isSequential = index === current + 1
-
-      if (isSequential) {
-        // Sequential forward — queue for smooth loop-boundary transition
-        dispatch({ type: 'QUEUE_MODULE', payload: index })
-      } else {
-        // Non-sequential — dispatch immediately so video fade-to-black starts in sync with content panel
-        dispatch({ type: 'SET_MODULE', payload: index })
-        dispatch({ type: 'PLAY' })
-      }
+      // Non-prelude target: IntroOverlay handles fade-to-black and PLAY
+      dispatch({ type: 'SET_MODULE', payload: index })
       return
     }
 
-    // Sequential forward during active playback — queue and let the current clip finish
-    // (mirrors the intro-to-prelude pattern: suppress idle loop-back, play to natural end, then switch)
-    const isSequentialForward = index === state.currentModuleIndex + 1
-    if (isSequentialForward) {
-      dispatch({ type: 'QUEUE_MODULE', payload: index })
+    // From idle + sequential-forward target → defer the cut to the loop boundary.
+    // VideoPlayerStacked watches pendingSequentialTarget and schedules the dispatch
+    // so the cut lands on the loop's last frame (matched to next module's frame 0).
+    if (
+      state.isIdle &&
+      state.currentModuleIndex >= 0 &&
+      index === state.currentModuleIndex + 1
+    ) {
+      // Re-click of the same pending target → no-op
+      if (state.pendingSequentialTarget === index) return
+      dispatch({ type: 'SET_PENDING_SEQUENTIAL', payload: index })
       return
     }
 
-    // Non-sequential during active playback — dispatch immediately, cancel any pending queue.
-    // The fade system in VideoPlayerStacked handles rapid clicks via useLayoutEffect cleanup.
+    // Any other path (mid-main, non-sequential, backward): clear any pending defer
+    // so a user can escape a queued boundary cut by choosing a different target.
+    if (state.pendingSequentialTarget !== null) {
+      dispatch({ type: 'SET_PENDING_SEQUENTIAL', payload: null })
+    }
+
+    // From any module (main or loop) → any target. Transition style is decided
+    // by VideoPlayerStacked using state.isIdle (loop) vs !state.isIdle (mid-main)
+    // and sequential vs non-sequential target.
     dispatch({ type: 'SET_MODULE', payload: index })
     dispatch({ type: 'PLAY' })
   }

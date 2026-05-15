@@ -90,8 +90,8 @@ export default defineConfig({
     }),
     visionTool(),
     muxInput({
-      // MUX configuration for video handling
-      mp4_support: 'standard'
+      mp4_support: 'standard',
+      max_resolution_tier: '2160p',
     }),
   ],
   

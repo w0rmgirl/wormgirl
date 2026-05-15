@@ -39,7 +39,6 @@ export interface SanityModule {
       assetId: string
     }
   }
-  videoEndTimecode?: string
   articleHeading?: string
   body: any[] // Portable Text blocks
   glossary?: Array<{
@@ -116,7 +115,6 @@ export const MODULES_QUERY = `
         assetId
       }
     },
-    videoEndTimecode,
     articleHeading,
     body,
     glossary[] {
@@ -158,7 +156,6 @@ export const MODULE_BY_SLUG_QUERY = `
         assetId
       }
     },
-    videoEndTimecode,
     articleHeading,
     body,
     glossary[] {
@@ -235,7 +232,6 @@ export async function getModules(): Promise<SanityModule[]> {
       timeline,
       video,
       idleVideo,
-      videoEndTimecode,
       body,
       glossary,
       footnotes,

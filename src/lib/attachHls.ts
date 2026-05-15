@@ -30,8 +30,11 @@ export default function attachHls(video: HTMLVideoElement, src: string) {
     delete (video as any)._hlsSrc
   }
 
-  if (canNative && !Hls.isSupported()) {
-    // Native playback – just set the src attribute
+  if (canNative) {
+    // Native playback – just set the src attribute.
+    // Prefer this over hls.js whenever the browser supports HLS natively (Safari,
+    // including iOS). hls.js fetches the manifest via XHR, which fails CORS on
+    // Mux's signed rendition URLs on iOS Safari and causes a black screen.
     video.src = src
     return
   }
