@@ -226,12 +226,8 @@ Module 3+: TBD (currently static)
 
 ## Mobile Fixes Checklist (2026-03-27)
 
-- [x] 1. Match mobile module tab bar text + styling to desktop (added `text-light` to inactive button state)
-- [ ] 2. Next Chapter / Prelude button appears above the mobile module tab bar (use `barGap` offset)
-- [ ] 3. Reduce content panel top padding and peek height so more video shows
-- [x] 4. Audit video position — implemented drift system with per-module animated object-position
-- [ ] 5. Top menu: About + Library tabs split width, smaller height, center-aligned text. Library missing books section in DOM.
-- [x] 6. Fix glossary/footnotes click-to-scroll on mobile (hooks bail out with `if (isMobile) return`)
-- [ ] 7. Desktop: glossary/footnote anchor links scroll to wrong position after panel expand/contract. Also need more top offset so highlighted word isn't on the very first line.
-- [ ] 8. **Smooth out drift animation**: The rAF-driven object-position drift still looks choppy/loopy in practice. The cubic ease-in (`t³`) may be too aggressive, or the position updates may need interpolation smoothing (e.g. exponential decay / lerp toward target instead of snapping to calculated position each frame). Investigate on both Safari and Chrome.
-- [ ] 9. **Real device mobile audit**: All current mobile positioning (video drift, content panel, translateY shifts, module bar) was tuned using desktop browser at mobile viewport size. On actual mobile devices things look off — likely due to differences in viewport height (Safari chrome bar, safe area insets), touch behavior, and how `vh` units resolve. Needs hands-on testing with a real device and adjustments.
+- [ ] 1. Reduce content panel top padding and peek height so more video shows
+- [ ] 2. Top menu: About + Library tabs split width, smaller height, center-aligned text. Library missing books section in DOM.
+- [ ] 3. Desktop: glossary/footnote anchor links scroll to wrong position after panel expand/contract. Also need more top offset so highlighted word isn't on the very first line.
+- [ ] 4. **Smooth out drift animation**: The rAF-driven object-position drift still looks choppy/loopy in practice. The cubic ease-in (`t³`) may be too aggressive, or the position updates may need interpolation smoothing (e.g. exponential decay / lerp toward target instead of snapping to calculated position each frame). Investigate on both Safari and Chrome.
+- [ ] 5. **Real device mobile audit**: All current mobile positioning (video drift, content panel, translateY shifts, module bar) was tuned using desktop browser at mobile viewport size. On actual mobile devices things look off — likely due to differences in viewport height (Safari chrome bar, safe area insets), touch behavior, and how `vh` units resolve. Needs hands-on testing with a real device and adjustments.

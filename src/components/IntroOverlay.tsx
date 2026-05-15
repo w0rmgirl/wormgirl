@@ -2,6 +2,7 @@
 
 import { useEffect, useLayoutEffect, useRef, useState } from 'react'
 import attachHls from '@/lib/attachHls'
+import LoadingDots from '@/components/LoadingDots'
 import { client } from '@/lib/sanity'
 import { useVideo } from '@/context/VideoContext'
 import { useModules } from '@/context/ModulesContext'
@@ -91,6 +92,7 @@ export default function IntroOverlay({ onFinish }: { onFinish: () => void }) {
   }, [])
 
   const [buttonDismissed, setButtonDismissed] = useState(false)
+  const [showLoading, setShowLoading] = useState(false)
 
   // Button is shown only once we've reached the loop phase (main finished playing).
   // This keeps the original "zoom plays first, button appears at rest" behavior.
@@ -98,7 +100,6 @@ export default function IntroOverlay({ onFinish }: { onFinish: () => void }) {
     introPhase === 'loop' &&
     (isVideoReady || fallbackReady) &&
     !isClosing &&
-    !pendingPrelude &&
     !buttonDismissed &&
     !modulesState.loading &&
     modulesState.modules.length > 0
@@ -227,7 +228,7 @@ export default function IntroOverlay({ onFinish }: { onFinish: () => void }) {
         tMs: performance.now().toFixed(1),
       })
     }, 50)
-    setTimeout(onFinish, 50)
+    setTimeout(onFinish, 550)
   }
 
   // Prelude request signal
@@ -354,15 +355,22 @@ export default function IntroOverlay({ onFinish }: { onFinish: () => void }) {
   }, [introPhase, loopUrl])
 
   const handleClick = () => {
-    setButtonDismissed(true)
-    setTimeout(() => {
-      playModule(0)
-      const firstModule = modulesState.modules[0]
-      if (firstModule?.slug?.current) {
-        setModulePage(0, firstModule.slug.current)
-      }
-    }, 300)
+    setShowLoading(true)
+    playModule(0)
+    const firstModule = modulesState.modules[0]
+    if (firstModule?.slug?.current) {
+      setModulePage(0, firstModule.slug.current)
+    }
   }
+
+  // Reset "Loading" label only after the button has finished fading out, so the
+  // user never sees the label swap back to PRELUDE while visible.
+  useEffect(() => {
+    if (!showLoading) return
+    if (buttonShouldShow) return
+    const t = window.setTimeout(() => setShowLoading(false), 600)
+    return () => window.clearTimeout(t)
+  }, [showLoading, buttonShouldShow])
 
   // Opacity for the two video elements (intro main vs intro loop). When no loop clip is
   // provided we keep main visible during the loop phase as a static last-frame fallback.
@@ -463,7 +471,7 @@ export default function IntroOverlay({ onFinish }: { onFinish: () => void }) {
       <button
         type="button"
         onClick={handleClick}
-        className="fixed bg-black text-light font-serif font-normal text-xs tracking-wide uppercase border-light border hover:bg-light hover:text-black px-5 py-2 z-[41]"
+        className="fixed bg-black text-light font-serif font-normal text-xs tracking-wide uppercase border-light border hover:bg-light hover:text-black px-5 py-2 z-[41] w-36 text-center"
         style={{
           left: '50%',
           bottom: (() => {
@@ -479,11 +487,11 @@ export default function IntroOverlay({ onFinish }: { onFinish: () => void }) {
             return `translateX(calc(-50% - ${sidebarOffset + panelOffset}px))`
           })(),
           opacity: buttonShouldShow ? 1 : 0,
-          transition: 'bottom 500ms cubic-bezier(0.4, 0, 0.2, 1), opacity 0.3s ease-in-out',
+          transition: 'bottom 500ms cubic-bezier(0.4, 0, 0.2, 1), opacity 500ms cubic-bezier(0.4, 0, 0.2, 1)',
           pointerEvents: buttonShouldShow ? 'auto' : 'none',
         }}
       >
-        {buttonLabel || 'PRELUDE'}
+        {showLoading ? <>Loading<LoadingDots /></> : (buttonLabel || 'PRELUDE')}
       </button>
     </>
   )

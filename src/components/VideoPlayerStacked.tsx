@@ -3,6 +3,7 @@
 
 import { useEffect, useRef, useState, useLayoutEffect, Fragment } from 'react'
 import attachHls from '@/lib/attachHls'
+import LoadingDots from '@/components/LoadingDots'
 import { useVideo } from '@/context/VideoContext'
 import { useModules } from '@/context/ModulesContext'
 import { usePageState } from '@/context/PageStateContext'
@@ -94,6 +95,7 @@ export default function VideoPlayerStacked() {
   const fadeStartedRef = useRef(false)
 
   const [buttonVisible, setButtonVisible] = useState(false)
+  const [showLoading, setShowLoading] = useState(false)
 
   // Mobile drift rAF: reads main video currentTime, writes objectPosition to both
   // main and loop elements so the loop inherits the drift's final position.
@@ -168,6 +170,15 @@ export default function VideoPlayerStacked() {
   useEffect(() => {
     prevIsIdleRef.current = videoState.isIdle
   }, [videoState.isIdle])
+
+  // Reset "Loading" label only after the button has finished fading out, so the
+  // user never sees the label swap back to "Next Chapter" while visible.
+  useEffect(() => {
+    if (!showLoading) return
+    if (buttonVisible) return
+    const t = window.setTimeout(() => setShowLoading(false), buttonDuration + 100)
+    return () => window.clearTimeout(t)
+  }, [showLoading, buttonVisible])
 
   // Next Chapter button visibility
   useEffect(() => {
@@ -623,7 +634,7 @@ export default function VideoPlayerStacked() {
           type="button"
           onClick={(e) => {
             e.currentTarget.blur()
-            setButtonVisible(false)
+            setShowLoading(true)
             const nextIdx = currentIndex + 1
             playModule(nextIdx)
             const nextModule = modules[nextIdx]
@@ -632,7 +643,7 @@ export default function VideoPlayerStacked() {
             }
             window.dispatchEvent(new CustomEvent('mobile-module-bar-scroll', { detail: { index: nextIdx } }))
           }}
-          className="fixed bg-black text-light font-serif font-normal text-xs tracking-wide uppercase border-light border [@media(hover:hover)]:hover:bg-light [@media(hover:hover)]:hover:text-black px-5 py-2 z-40"
+          className="fixed bg-black text-light font-serif font-normal text-xs tracking-wide uppercase border-light border [@media(hover:hover)]:hover:bg-light [@media(hover:hover)]:hover:text-black px-5 py-2 z-40 w-36 text-center"
           style={{
             left: '50%',
             bottom: isMobile ? 'calc(115px + 0.5rem)' : '1rem',
@@ -655,7 +666,7 @@ export default function VideoPlayerStacked() {
             pointerEvents: buttonVisible && !(isMobile && pageState.isTopMenuOpen) ? 'auto' : 'none',
           } as CSSProperties}
         >
-          Next Chapter
+          {showLoading ? <>Loading<LoadingDots /></> : 'Next Chapter'}
         </button>
       )}
 
