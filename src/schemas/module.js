@@ -39,16 +39,9 @@ export default {
     },
     {
       name: 'idleVideo',
-      title: 'Idle Video (legacy)',
+      title: 'Idle Loop Video',
       type: 'mux.video',
-      description: 'Legacy: separate idle clip. Use mainEnd instead for baked-in idle.',
-      hidden: true
-    },
-    {
-      name: 'videoEndTimecode',
-      title: 'Video End Timecode',
-      type: 'string',
-      description: 'Timecode of the last frame of the video (e.g. 00;00;48;00 at 30fps). The idle loop starts 3s before this. Format: HH;MM;SS;FF'
+      description: 'Loop clip that plays after the main video ends. Should be a seamless ~3s cycle (last frame matches first frame). Played natively with <video loop>.'
     },
     {
       name: 'articleHeading',

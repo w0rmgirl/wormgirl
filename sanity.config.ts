@@ -49,10 +49,11 @@ export default defineConfig({
     visionTool(),
     muxInput({
       mp4_support: 'standard',
-      // Try adding these options
+      max_resolution_tier: '2160p',
       ...(process.env.MUX_TOKEN_ID && process.env.MUX_TOKEN_SECRET && {
-        enableSignedUrls: false, // Start with unsigned URLs
-        mp4_support: 'standard'
+        enableSignedUrls: false,
+        mp4_support: 'standard',
+        max_resolution_tier: '2160p',
       })
     }),
   ],

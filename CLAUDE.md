@@ -26,8 +26,8 @@ src/
 │   ├── globals.css         # Tailwind base + CSS custom properties
 │   └── studio/             # Sanity Studio route (/studio)
 ├── components/
-│   ├── VideoPlayerStacked  # Core: stacked <video> elements, idle loop, fade transitions
-│   ├── IntroOverlay        # Splash screen with intro video + auto-dismiss
+│   ├── VideoPlayerStacked  # Core: two <video> elements per module (main + loop), fade transitions
+│   ├── IntroOverlay        # Splash screen with intro main + intro loop, auto-dismiss
 │   ├── Sidebar             # Desktop nav: modules (Roman numerals) + content pages
 │   ├── ContentPanel        # Article display (module body or content pages), cross-fade
 │   ├── MobileTopMenu       # Mobile menu overlay for content pages
@@ -36,7 +36,7 @@ src/
 │   ├── TruncatedDescription # "See More/Less" text overflow
 │   └── ImageCarousel       # Click-to-navigate image carousel
 ├── context/
-│   ├── VideoContext         # Playback state, playModule(), idle/queue system
+│   ├── VideoContext         # Playback state, playModule(), idle phase
 │   ├── PageStateContext     # Navigation: module vs content page, panel stage
 │   ├── ModulesContext       # Fetches modules from Sanity, provides getModule()
 │   └── ContentPagesContext  # Fetches about/library pages from Sanity
@@ -63,65 +63,68 @@ ContentPagesProvider
 
 ## Video System — How It Works
 
-### Stacked Architecture
-All module videos are rendered as `<video>` elements stacked via absolute positioning. Only the active module has `opacity: 1`; all others are `opacity: 0`. This allows instant switching without destroying/recreating video elements.
+### Two-Clip Architecture (per module)
 
-**Important**: VideoPlayerStacked renders ALL module videos even when `currentModuleIndex === -1` (intro active). They sit at opacity 0 behind the IntroOverlay so HLS can pre-load. The old `currentIndex === -1` early return was removed to enable this.
+Each module ships two video assets:
 
-### Idle Loop
-Each module has a `videoEndTimecode` (HH;MM;SS;FF at 30fps) in Sanity. The last 3 seconds of each video are a baked idle loop. When playback reaches `mainEnd` (timecode - 3s), the player enters **idle mode** and loops between mainEnd → end of video continuously.
+- `video` (main): the animated event, plays once to its natural end.
+- `idleVideo` (loop): a short seamless cycle (~3s, last frame matches first frame), played with native HTML5 `<video loop>`.
+
+Both `<video>` elements are rendered for every module, stacked via absolute positioning. Opacity selects which one is visible. All modules' elements render from page load (including during the intro) so HLS pre-buffering can run in parallel.
+
+**Phase state**: `videoState.isIdle === false` → main is visible. `videoState.isIdle === true` → loop is visible. The transition between phases happens inside `handleMainEnded` on the main element — instant swap, no fade.
+
+**Fallback for missing loopVideo** (transitional state during asset migration): if a module has no `idleVideo` uploaded, main pauses on its last frame instead of swapping. Drift freezes. The Next Chapter button still appears.
 
 ### Transitions
 
-- **From intro → prelude (module 0)**: Seamless cut, NO fade-to-black. The last frame of the intro clip matches the first frame of the prelude clip. `playModule(0)` does NOT dispatch `SET_MODULE` — it sets `introPreludeRef` (shared ref on VideoContext) and dispatches `SET_PENDING_PRELUDE`. IntroOverlay detects this, suppresses idle-mode entry and loop-back in the intro video, lets it play to its natural end (`handleEnded` event), then dispatches `SET_MODULE(0)` + `PLAY` and instantly removes the overlay (no CSS opacity transition). See "Intro-to-Prelude Transition" section below.
-- **From intro → non-prelude module**: IntroOverlay handles the entire transition. Fades inner black overlay to opaque, waits for target video to have decoded frames at position 0, dispatches PLAY, fades entire overlay to opacity 0 to reveal module video. VideoPlayerStacked does nothing (no fade, no seek).
-- **Sequential forward** (e.g. Module I → Module II): Instant cut, no fade. Video starts from 0. If from idle, queued via `QUEUE_MODULE` and switches at next loop boundary; `switchFromIdleRef` suppresses fade.
-- **Non-sequential jump** (e.g. Module I → Module V): Fade-to-black (300ms overlay in, 20ms hold, 300ms overlay out = ~920ms). New video seeks to mainEnd and enters idle. Dispatched immediately via `SET_MODULE` (no debounce, no queue) so video and content panel fade in sync.
-- **Interrupted fade**: If user clicks during a fade-in, overlay smoothly fades back to black, then reveals the new (last-clicked) module. Overlay stays opaque through rapid clicks — only the final module fades in.
+Decision rule, applied in `VideoPlayerStacked`'s `useLayoutEffect` on `currentIndex` change:
+
+| Previous phase | Target | Behavior |
+|----------------|--------|----------|
+| Intro | Any | IntroOverlay handles it |
+| Main (mid-clip) | Any module | Fade-to-black (~920ms) |
+| Loop | Sequential next | Instant cut, no fade |
+| Loop | Non-sequential | Fade-to-black |
+
+The "previous phase" is determined by `prevIsIdleRef`, which mirrors `videoState.isIdle` from the previous render (captured before SET_MODULE flips it back to false).
+
+### Intro → Prelude (seamless cut)
+
+Intro's last frame is authored to match prelude's first frame.
+
+1. `playModule(0)` while currentModuleIndex === -1 sets `introPreludeRef.current = true` synchronously and dispatches `SET_PENDING_PRELUDE` (but NOT `SET_MODULE`).
+2. IntroOverlay watches `pendingPreludeFromIntro`.
+   - If intro is still in its main phase: wait for `ended`. On main end, `handleMainEnded` calls `triggerPreludeTransition` (because `pendingPreludeRef` is set).
+   - If intro is already in loop phase: schedule `setTimeout` for `(loop.duration - loop.currentTime - 30ms)`, so the cut lands on the last frame of the current loop iteration. Requires the loop's last frame to be authored to match prelude main frame 0.
+3. `triggerPreludeTransition` dispatches `SET_MODULE(0)` + `PLAY`, sets `instantCut = true` (disables overlay opacity transition), and calls `onFinish` after 50ms.
+
+### Intro → non-prelude module
+
+IntroOverlay handles the entire fade-to-black sequence (300ms fade in, wait for target video to be decoded at frame 0, 300ms fade out). VideoPlayerStacked sees `prevIndexRef === -1` and just snaps the new module's main into place.
 
 ### Key Mechanism: renderTick
-The opacity of each video is determined during React render using `prevIndexRef` (a ref). When the sequential/fromIdle path updates this ref in `useLayoutEffect`, a `setRenderTick(c => c + 1)` forces a synchronous re-render before paint so the correct video is visible immediately (no flash of old frame).
 
-### Intro-to-Prelude Transition (detailed)
-
-This is the most complex transition and has been a source of multiple bugs. Key constraints:
-- The intro clip's last frame matches the prelude clip's first frame (seamless cut)
-- If intro is still playing first time through → let it finish completely, then cut
-- If intro is already looping → finish the current loop iteration, then cut
-- NO fade-to-black — instant overlay removal
-
-**Architecture**:
-1. `playModule(0)` from intro sets `introPreludeRef.current = true` synchronously (shared ref on VideoContext), then dispatches `SET_PENDING_PRELUDE` (but NOT `SET_MODULE`). This is critical — dispatching `SET_MODULE` would make VideoPlayerStacked show/play the prelude immediately.
-2. IntroOverlay's `useLayoutEffect` watches `videoState.pendingPreludeFromIntro` and sets local `pendingPreludeRef` + `pendingPrelude` state.
-3. `handleTimeUpdate` returns early when `pendingPreludeRef.current` is true — this suppresses idle-mode entry (so first playthrough continues past mainEnd) and suppresses loop-back seek (so idle loop plays to natural end).
-4. `handleEnded` fires when video reaches actual end → calls `triggerPreludeTransition()`.
-5. `triggerPreludeTransition` dispatches `SET_MODULE(0)` + `PLAY`, sets `instantCut = true` (disables CSS transition on overlay), sets `overlayOpacity = 0`, calls `onFinish` after 50ms.
-
-**Critical race condition (fixed)**: `introPreludeRef` MUST be set synchronously before any state dispatch. If set in a useEffect/useLayoutEffect, there's a window where a `timeupdate` event fires and the idle loop code seeks back to mainEnd before the ref is set. The ref lives on VideoContext and is set inside `playModule()` itself, before the dispatch call.
-
-**Known issue**: Clicking the prelude sidebar tab while the intro is already looping can still produce a slight frame jump. The PRELUDE button path is seamless. The sidebar path goes through `playModule()` which sets the ref synchronously, but there's still a narrow race window.
+When the layout effect updates `prevIndexRef` (instant-cut or from-intro paths), `setRenderTick(c => c + 1)` forces a synchronous re-render before paint so the opacity calc sees the updated ref and no stale frame paints.
 
 ## Navigation Flow
 
 ```
-Sidebar click → playModule(index) + setModulePage(index, slug)
+Sidebar / module bar / Next Chapter button → playModule(index) + setModulePage(index, slug)
                     ↓
-          VideoContext handles routing:
+          VideoContext.playModule:
             • Same module + idle → no-op
-            • From intro + prelude → SET_PENDING_PRELUDE only (IntroOverlay handles everything)
-            • From intro + non-prelude → SET_MODULE only (IntroOverlay handles PLAY + transition)
-            • Idle + sequential forward → QUEUE_MODULE (waits for loop boundary)
-            • Idle + non-sequential → immediate SET_MODULE + PLAY
-            • Active playback → immediate SET_MODULE + PLAY
+            • From intro + prelude → SET_PENDING_PRELUDE (IntroOverlay handles)
+            • From intro + non-prelude → SET_MODULE (IntroOverlay handles fade + PLAY)
+            • Any module → any target → SET_MODULE + PLAY
                     ↓
-          From intro to prelude: IntroOverlay waits for video end → SET_MODULE(0) + PLAY → instant cut
-          From intro to other: IntroOverlay fade-to-black → wait for frames → PLAY → fade overlay out
-          Otherwise: VideoPlayerStacked useLayoutEffect detects change:
-            • Sequential/fromIdle → instant switch (renderTick forces sync re-render)
-            • Non-sequential → fade-to-black sequence (~920ms)
-            • Interrupted fade → overlay stays/returns to black, restarts for new target
+          VideoPlayerStacked useLayoutEffect on currentIndex change:
+            • From intro (prev === -1) → snap, no fade (IntroOverlay handled it)
+            • Previous was loop + sequential next → instant cut (renderTick forces sync re-render)
+            • Previous was loop + non-sequential → fade-to-black (~920ms)
+            • Previous was mid-main → fade-to-black (~920ms)
                     ↓
-          ContentPanel cross-fade (920ms) runs in parallel, triggered by same tick
+          ContentPanel cross-fade (920ms) runs in parallel for fade-to-black transitions
 ```
 
 ## PreLoader → IntroOverlay Handoff
@@ -136,8 +139,8 @@ PreLoader completes past 90% and fades out once both signals arrive.
 
 | Document | Key Fields |
 |----------|------------|
-| **module** | title, slug, order, timeline, video (mux), videoEndTimecode, articleHeading, body (blockContent), glossary[], footnotes[], tabImage |
-| **intro** | video, videoEndTimecode, buttonLabel |
+| **module** | title, slug, order, timeline, video (mux, main playthrough), idleVideo (mux, seamless loop), articleHeading, body (blockContent), glossary[], footnotes[], tabImage |
+| **intro** | video (zoom-in), idleVideo (held-camera loop), buttonLabel |
 | **aboutPage** | title, slug, content (blockContent) |
 | **libraryPage** | title, slug, description, sound[], books[] |
 | **blockContent** | Portable Text with marks: strong, em, smallCaps, footnoteRef, glossaryRef |
@@ -149,72 +152,18 @@ PreLoader completes past 90% and fades out once both signals arrive.
 | `main` | Production | Stable release |
 | `feature/single-video-timestamps` | **Active** | Current work: video timecode & transition fixes |
 | `feature/midpoint-exit-logic` | In-flight | Midpoint exit behavior |
-| `feature/wiggle-idle-effect` | In-flight | Idle visual effect |
 
-## Current Issues & Recent Fixes
+## History
 
-### Fixed: Intro-to-prelude seamless transition (2026-03-26)
-**Problem**: Clicking prelude from intro produced frame flashes, the prelude video was already playing mid-stream, and the transition had visible fades instead of a seamless cut.
-**Root causes**: (1) `SET_MODULE(0)` dispatched on click caused VideoPlayerStacked to immediately show/play the prelude. (2) `waitForVideoReady` polling caused delays. (3) CSS opacity transition caused visible fade when frames should match seamlessly. (4) `pendingPreludeRef` set in useEffect had race condition with idle loop timeupdate events.
-**Fix**: `playModule(0)` from intro now only dispatches `SET_PENDING_PRELUDE` (not `SET_MODULE`). `introPreludeRef` shared on VideoContext is set synchronously before dispatch. IntroOverlay suppresses idle entry/loop-back, waits for `ended` event, then dispatches `SET_MODULE(0)` + `PLAY` with instant overlay removal (no CSS transition).
+### 2026-05-14 — Two-clip revert
+Reverted the single-clip-with-baked-3s-idle-loop architecture to the original two-clip pattern (`video` main + `idleVideo` loop with native `<video loop>`). The single-clip approach had been introduced (commit `879c803`, 2026-03-26) to support a "wiggle" idle effect that has since been killed. Reverting eliminated the hls.js last-frame-skip bug, the `QUEUE_MODULE` machinery, the `nearEnd` threshold race, and the intro-to-prelude `pendingPreludeRef` suppression logic. Mid-main clicks now use the same fade-to-black as out-of-order jumps (per user direction). Plan: `/Users/e/.claude/plans/plan-the-refactor-now-floofy-beaver.md`. See "Asset Migration" below.
 
-### Fixed: First-frame flash on module switch (2026-03-26)
-**Problem**: When navigating to next module (sequential or from idle), the old video's frame flashed for 1-2 frames before the new video appeared.
-**Root cause**: `prevIndexRef` (a ref) was updated in `useLayoutEffect` but refs don't trigger re-renders. The first render painted with `inTransition = true` showing the old video, and no state update forced a re-render before browser paint.
-**Fix**: Added `setRenderTick(c => c + 1)` in the sequential/fromIdle branch to force a synchronous re-render before paint, so the opacity calculation sees the updated `prevIndexRef` immediately.
+### Asset Migration (in progress)
+Modules and the intro need re-export from Blender as two separate clips each: a `video` main (the animated event, no baked tail) and an `idleVideo` loop (a seamless ~3s cycle where the last frame matches the first). Until a module's `idleVideo` is uploaded, the fallback behavior pauses main on its last frame.
 
-### Fixed: Non-sequential transition desync & missing fade (2026-03-26)
-**Problem**: Three related issues with non-sequential module switching:
-1. **No fade from idle**: `flushQueuedModule` always set `switchFromIdleRef=true`, causing non-sequential idle jumps to use the instant-switch path instead of fade-to-black.
-2. **350ms debounce desync**: Active playback transitions debounced `SET_MODULE` by 350ms, but `setModulePage` (content panel) fired immediately — content faded while video lagged.
-3. **Multi-second idle lag**: Non-sequential clicks from idle used `QUEUE_MODULE`, waiting up to 3s for the idle loop boundary before switching.
-**Fix**: Removed debounce entirely. Non-sequential from idle now dispatches `SET_MODULE` immediately (only sequential forward still queues). `flushQueuedModule` only sets `switchFromIdleRef=true` for sequential jumps.
-
-### Fixed: Next Chapter button showing during intro (2026-03-26)
-**Problem**: After VideoPlayerStacked was changed to render videos during intro (for pre-loading), the Next Chapter button appeared when `currentIndex === -1` because `videoState.isIdle` starts as `true`.
-**Fix**: Added `currentIndex >= 0` guard to the Next Chapter button render condition.
-
-### Fixed: Pre-rendered module videos for HLS pre-loading (2026-03-26)
-**Problem**: Module videos only rendered after `SET_MODULE` dispatched, causing slow HLS loading during transitions.
-**Fix**: Removed the `currentIndex === -1` early return from VideoPlayerStacked. All module videos now render at opacity 0 from page load, allowing HLS to pre-buffer.
-
-### Fixed: PreLoader sync with intro video (2026-03-27)
-**Problem**: PreLoader faded out before intro video was ready, showing a black screen.
-**Fix**: PreLoader now waits for both `window.load` AND `intro-video-ready` custom DOM event (dispatched by IntroOverlay on `canPlay`) before completing past 90%.
-
-### Bug: Sequential module transition skips last frames when timecode is set (2026-03-27)
-**Status**: OPEN — cosmetic only, works perfectly on Safari mobile
-**Symptoms**: Modules WITH `videoEndTimecode` skip ~4-5 frames at the end of the idle loop when transitioning to the next sequential module on desktop. Modules WITHOUT timecodes and Safari mobile transitions are seamless.
-**Root cause**: The `nearEnd` check (`dur - ct < 0.15`) in `handleTimeUpdate` flushes the queued module ~150ms before the video's actual last frame. Safari mobile uses native HLS with frame-accurate `timeupdate` events; desktop browsers use hls.js which fires `timeupdate` coarsely (~250ms intervals).
-**Attempted fixes**:
-1. Deferring flush to `handleEnded` — **failed**: `handleEnded` doesn't fire reliably with hls.js, causing the video to freeze.
-2. Tightening threshold to `0.05s` — **failed**: hls.js timeupdate jumps over the small window entirely.
-3. Preferring native HLS on Safari desktop — **failed**: caused video quality degradation on Chrome, and Safari desktop still uses hls.js path since `Hls.isSupported()` is true.
-4. Suppressing loop-back seek + `requestVideoFrameCallback` polling — rVFC fired every ~33ms correctly. With threshold `< 0.005s`, `handleEnded` flushed at `gap=0.0000`. Incoming video ready: `readyState=4`, `currentTime=0`. **Still skipped.**
-5. Removing `vid.pause()` from flushQueuedModule — no difference.
-6. Pre-playing incoming video at opacity 0 before dispatch — Chrome improved, Safari still skipped. Caused freeze if combined with `currentTime=0` seek.
-7. `willChange: 'opacity'` + `transform: translateZ(0)` (GPU compositor layer hints) — **Chrome fixed**, Safari still skipped.
-8. `opacity: 0.001` instead of `0` for inactive videos (keep Safari compositor engaged) — no difference on Safari.
-9. Pre-setting `prevIndexRef` before dispatch (eliminate double-render cycle) — no difference on Safari.
-10. Delaying dispatch until incoming video's rVFC fires (wait for presented frame) — rVFC took 405ms on Safari; old video restarted from frame 0 due to handlePause.
-11. Double-rAF before dispatch — still skipped on Safari.
-12. 100ms micro cross-fade (CSS opacity transition between old and new video) — still visible on Safari.
-13. Extending source video with ~5 overlap frames duplicating loop start — hls.js still skips the same way; overlap frames don't help because the skip is a compositor/rendering issue, not a decoder issue.
-**Root cause**: Two separate issues confirmed via rVFC instrumentation:
-- **hls.js decoder skip**: Video jumps from `gap≈0.08` to `ended` without presenting last 2-3 frames. Safari mobile (native HLS) decodes every frame.
-- **Compositor delay**: Even with perfect flush timing (`gap=0.0000`), the opacity swap between video elements takes 1-2 extra frames on Safari desktop. Chrome was fixed with `willChange: 'opacity'` but Safari's compositor does not respond to the same hints.
-**Conclusion**: Chrome can be fixed with compositor hints (`willChange: 'opacity'`). Safari desktop's skip appears to be an inherent limitation of its video element compositing. No client-side approach tested could eliminate it. The skip is cosmetic and not present on Safari mobile (native HLS).
-
-### Fixed: Intro-to-prelude frame cut on mobile (2026-03-27)
-**Problem**: Visible position shift at the intro→prelude cut on mobile, despite identical source frames and matching `objectPosition` values.
-**Root cause**: VideoPlayerStacked wraps videos in a `translateY(-2rem)` div when the content panel is in `peek` stage, but IntroOverlay had no such transform. The prelude video rendered 32px higher than the intro video at the instant of the cut.
-**Fix**: Added matching content-panel-aware `translateY` wrapper to IntroOverlay's video element. Both components now apply identical transforms (`-2rem` for peek, `-60vh` for expanded).
-**Debug technique**: Used step-by-step pause mode (`window.__debugTransition`) to screenshot the intro's last frame and prelude's first frame independently, then compared `getBoundingClientRect()` to find the 32px offset.
-
-### Fixed: Sequential click during active playback skips rest of clip (2026-03-27)
-**Problem**: When a module's main content is still playing (not yet in idle loop) and the user clicks the next sequential module, the current clip was abandoned immediately and the next module started.
-**Root cause**: `playModule()` dispatched `SET_MODULE` + `PLAY` immediately for all clicks during active playback, with no distinction between sequential and non-sequential.
-**Fix**: Sequential forward clicks during active playback now dispatch `QUEUE_MODULE` instead of `SET_MODULE`. In `handleTimeUpdate`, idle entry is suppressed when a module is queued — the video plays through the 3s idle section to its natural end. `flushQueuedModule` fires at the near-end threshold (`gap < 0.15`) or on the `ended` event (backup). Non-sequential clicks still dispatch `SET_MODULE` immediately, which clears the queue.
+### Earlier fixes still relevant
+- **PreLoader sync with intro video**: PreLoader waits for both `window.load` AND `intro-video-ready` custom DOM event (dispatched by IntroOverlay on `canPlay`) before completing past 90%.
+- **Intro-to-prelude frame cut on mobile**: VideoPlayerStacked wraps videos in a content-panel-aware `translateY` wrapper. IntroOverlay applies the same wrapper so the intro→prelude cut has no vertical shift. **Critical**: if you change the wrapper transform in one, change it in the other.
 
 ## Debug Tools
 
@@ -257,7 +206,7 @@ Mobile videos use animated `object-position` to create a slow pan/drift effect. 
 - **Multi-drift**: `{ start, end, drifts: [{ end, driftEnd, driftStart? }] }` — multiple sequential drift phases with holds between them. Each phase uses cubic ease-in (`t³`).
 - `start` of module N MUST match `end` of module N-1 (or intro end for module 0).
 - `end` must match the last drift phase's end position.
-- `driftEnd` timecode = when drift reaches end position. If omitted on simple drift, falls back to `mainEnd`.
+- `driftEnd` timecode = when drift reaches end position (within main playback). If omitted on simple drift, falls back to main `duration`. Drift freezes at its last computed value when the loop phase takes over.
 - `driftStart` timecode = when a drift phase begins (for multi-drift gaps/holds).
 
 ### Why rAF instead of CSS transitions
@@ -284,3 +233,5 @@ Module 3+: TBD (currently static)
 - [ ] 5. Top menu: About + Library tabs split width, smaller height, center-aligned text. Library missing books section in DOM.
 - [x] 6. Fix glossary/footnotes click-to-scroll on mobile (hooks bail out with `if (isMobile) return`)
 - [ ] 7. Desktop: glossary/footnote anchor links scroll to wrong position after panel expand/contract. Also need more top offset so highlighted word isn't on the very first line.
+- [ ] 8. **Smooth out drift animation**: The rAF-driven object-position drift still looks choppy/loopy in practice. The cubic ease-in (`t³`) may be too aggressive, or the position updates may need interpolation smoothing (e.g. exponential decay / lerp toward target instead of snapping to calculated position each frame). Investigate on both Safari and Chrome.
+- [ ] 9. **Real device mobile audit**: All current mobile positioning (video drift, content panel, translateY shifts, module bar) was tuned using desktop browser at mobile viewport size. On actual mobile devices things look off — likely due to differences in viewport height (Safari chrome bar, safe area insets), touch behavior, and how `vh` units resolve. Needs hands-on testing with a real device and adjustments.

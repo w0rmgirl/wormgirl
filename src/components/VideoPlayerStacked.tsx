@@ -1,7 +1,7 @@
 
 'use client'
 
-import { useEffect, useRef, useState, useLayoutEffect } from 'react'
+import { useEffect, useRef, useState, useLayoutEffect, Fragment } from 'react'
 import attachHls from '@/lib/attachHls'
 import { useVideo } from '@/context/VideoContext'
 import { useModules } from '@/context/ModulesContext'
@@ -10,7 +10,6 @@ import useIsMobile from '@/lib/hooks/useIsMobile'
 import type { CSSProperties } from 'react'
 import { timecodeToSeconds } from '@/lib/timecode'
 
-// Helper utilities shared with other players
 const getVideoPlaybackId = (video: any) => {
   return (
     video?.asset?.playbackId ||
@@ -21,19 +20,13 @@ const getVideoPlaybackId = (video: any) => {
   )
 }
 
-const getVideoUrl = (module: any) => {
-  const playbackId = getVideoPlaybackId(module?.video)
-  return playbackId ? `https://stream.mux.com/${playbackId}.m3u8` : null
-}
+const muxUrl = (playbackId: string | null) =>
+  playbackId ? `https://stream.mux.com/${playbackId}.m3u8` : null
 
-// Per-module object-position animation config.
-// Simple: { start, end, driftEnd? } — single drift from start to end.
-// Multi-drift: { start, end, drifts[] } — multiple sequential drift phases.
-//   Each drift has: end position, driftEnd timecode, and optional driftStart timecode.
-//   Drift N starts from drift N-1's end (or module start for drift 0).
-//   Between drifts, position holds at the previous drift's end.
-// IMPORTANT: Each module's start MUST match the previous module's (or intro's) end.
-// The final end position (last drift's end, or simple end) is held during idle.
+const getMainUrl = (module: any) => muxUrl(getVideoPlaybackId(module?.video))
+const getLoopUrl = (module: any) => muxUrl(getVideoPlaybackId(module?.idleVideo))
+
+// Per-module object-position animation config (mobile drift).
 type DriftPhase = { end: [number, number]; driftEnd: string; driftStart?: string }
 type ModulePosition = {
   start: [number, number]
@@ -44,22 +37,17 @@ type ModulePosition = {
 const MODULE_POSITIONS: ModulePosition[] = [
   // Module 0 (Prelude) — start must match intro end [53, 50]
   { start: [53, 50], end: [36, 50], driftEnd: '00;00;06;12' },
-  // Module 1 — start must match module 0 end [36, 50]
+  // Module 1
   { start: [36, 50], end: [60, 40], driftEnd: '00;00;06;00' },
-  // Module 2 — start must match module 1 end [60, 40]
+  // Module 2
   { start: [60, 40], end: [45, 35], drifts: [
     { end: [30, 15], driftEnd: '00;00;20;00' },
     { end: [45, 35], driftStart: '00;00;24;00', driftEnd: '00;00;28;00' },
   ]},
-  // Module 3 — start must match module 2 end [45, 35]
   { start: [45, 35], end: [45, 35] },
-  // Module 4
   { start: [50, 50], end: [50, 50] },
-  // Module 5
   { start: [50, 50], end: [50, 50] },
-  // Module 6
   { start: [50, 50], end: [50, 50] },
-  // Module 7
   { start: [50, 50], end: [50, 50] },
 ]
 
@@ -70,144 +58,127 @@ function lerpPosition(start: readonly number[], end: readonly number[], t: numbe
   return `${x.toFixed(2)}% ${y.toFixed(2)}%`
 }
 
-// Get the mainEnd timestamp in seconds — parses video end timecode and subtracts 3s (the baked idle section)
-const IDLE_LOOP_DURATION = 3
-const getMainEnd = (module: any): number | null => {
-  const endTime = timecodeToSeconds(module?.videoEndTimecode)
-  if (endTime === null) return null
-  return endTime - IDLE_LOOP_DURATION
-}
-
 export default function VideoPlayerStacked() {
   const { state: videoState, dispatch, playModule } = useVideo()
   const { state: modulesState } = useModules()
   const {
-    isModulePage,
     state: pageState,
     setModulePage,
     isContentPanelExpanded,
-  } = usePageState() // eslint-disable-line @typescript-eslint/no-unused-vars
+  } = usePageState()
   const isMobile = useIsMobile()
   const buttonDuration = 500
 
-  // Local debug toggle – press "d" to show/hide overlay
   const [showDebug, setShowDebug] = useState(false)
 
-  // One ref per module video
-  const videoRefs = useRef<(HTMLVideoElement | null)[]>([])
+  // Two refs per module: main playthrough and loop tail
+  const mainRefs = useRef<(HTMLVideoElement | null)[]>([])
+  const loopRefs = useRef<(HTMLVideoElement | null)[]>([])
 
-  // Per-module animated object-position (mobile only) — updated directly on DOM to avoid re-renders
+  // Mobile drift: animated object-position written directly to DOM (no re-renders)
   const videoPositionsRef = useRef<string[]>([])
 
-
-  // Cache modules list & indices early so all hooks can use them safely
   const modules = modulesState.modules
   const currentIndex = videoState.currentModuleIndex
 
-  // Track previous index to detect non-sequential jumps
+  // Track previous index for transition decision
   const prevIndexRef = useRef<number>(-1)
-  // Counter incremented in useLayoutEffect to force a synchronous re-render before paint
-  // when the sequential/fromIdle path updates prevIndexRef (a ref alone won't trigger re-render)
+  // Mirror of videoState.isIdle from the previous render — captures whether the
+  // previous module was in its loop phase (true) or mid-main (false) at the
+  // moment SET_MODULE flipped isIdle back to false.
+  const prevIsIdleRef = useRef<boolean>(true)
   const [, setRenderTick] = useState(0)
   const [shouldFade, setShouldFade] = useState(false)
   const [fadePhase, setFadePhase] = useState<'idle' | 'out' | 'in'>('idle')
-  // Synchronous ref mirror of shouldFade — used in useEffect to avoid stale closures
   const isFadingRef = useRef(false)
-  // Tracks whether the fade-out has started (distinguishes pre-out idle from post-in idle)
   const fadeStartedRef = useRef(false)
 
-  // Control Next Chapter button visibility with delayed show after idle starts
   const [buttonVisible, setButtonVisible] = useState(false)
 
-  // Current module info
-  const currentModule = currentIndex >= 0 && currentIndex < modules.length ? modules[currentIndex] : null
-  const mainEnd = currentModule ? getMainEnd(currentModule) : null
-
-  // rAF loop for smooth 60fps object-position drift (mobile only)
+  // Mobile drift rAF: reads main video currentTime, writes objectPosition to both
+  // main and loop elements so the loop inherits the drift's final position.
   useEffect(() => {
     if (!isMobile) return
 
     let rafId: number
     const tick = () => {
-      for (let i = 0; i < modules.length; i++) {
-        const ref = videoRefs.current[i]
-        const pos = MODULE_POSITIONS[i]
-        if (!ref || !pos) continue
+      // Skip while in loop phase — drift is frozen at its last value
+      if (!videoState.isIdle) {
+        for (let i = 0; i < modules.length; i++) {
+          const mainRef = mainRefs.current[i]
+          const loopRef = loopRefs.current[i]
+          const pos = MODULE_POSITIONS[i]
+          if (!mainRef || !pos) continue
+          if (i !== currentIndex) continue
 
-        // Only animate the active module
-        if (i !== currentIndex) continue
+          const ct = mainRef.currentTime
+          const dur = mainRef.duration
+          let posStr: string
 
-        const ct = ref.currentTime
-        const dur = ref.duration
-        let posStr: string
+          if (pos.drifts && pos.drifts.length > 0) {
+            let from: readonly number[] = pos.start
+            posStr = lerpPosition(from, from, 0)
 
-        if (pos.drifts && pos.drifts.length > 0) {
-          // Multi-drift: walk through phases to find the active one
-          let from: readonly number[] = pos.start
-          posStr = lerpPosition(from, from, 0) // default: hold at start
+            for (let d = 0; d < pos.drifts.length; d++) {
+              const drift = pos.drifts[d]
+              const driftStartSec = drift.driftStart ? timecodeToSeconds(drift.driftStart) : (d === 0 ? 0 : null)
+              const driftEndSec = timecodeToSeconds(drift.driftEnd)
 
-          for (let d = 0; d < pos.drifts.length; d++) {
-            const drift = pos.drifts[d]
-            const driftStartSec = drift.driftStart ? timecodeToSeconds(drift.driftStart) : (d === 0 ? 0 : null)
-            const driftEndSec = timecodeToSeconds(drift.driftEnd)
+              if (driftStartSec === null || driftEndSec === null || driftEndSec <= 0) {
+                from = drift.end
+                continue
+              }
 
-            if (driftStartSec === null || driftEndSec === null || driftEndSec <= 0) {
-              from = drift.end
-              continue
+              if (ct < driftStartSec) {
+                posStr = lerpPosition(from, from, 0)
+                break
+              } else if (ct >= driftStartSec && ct < driftEndSec) {
+                const phaseDuration = driftEndSec - driftStartSec
+                const linear = Math.min((ct - driftStartSec) / phaseDuration, 1)
+                const eased = linear * linear * linear
+                posStr = lerpPosition(from, drift.end, eased)
+                break
+              } else {
+                from = drift.end
+                posStr = lerpPosition(from, from, 0)
+              }
             }
-
-            if (ct < driftStartSec) {
-              // Before this drift starts — hold at current from position
-              posStr = lerpPosition(from, from, 0)
-              break
-            } else if (ct >= driftStartSec && ct < driftEndSec) {
-              // Inside this drift phase
-              const phaseDuration = driftEndSec - driftStartSec
-              const linear = Math.min((ct - driftStartSec) / phaseDuration, 1)
-              const eased = linear * linear * linear
-              posStr = lerpPosition(from, drift.end, eased)
-              break
-            } else {
-              // Past this drift — hold at its end, move to next phase
-              from = drift.end
-              posStr = lerpPosition(from, from, 0)
-            }
+          } else {
+            const driftEndSec = pos.driftEnd ? timecodeToSeconds(pos.driftEnd) : null
+            const endPoint = driftEndSec ?? (dur && dur !== Infinity && dur > 0 ? dur : null)
+            const linear = endPoint && endPoint > 0 ? Math.min(ct / endPoint, 1) : 0
+            const eased = linear * linear * linear
+            posStr = lerpPosition(pos.start, pos.end, eased)
           }
-        } else {
-          // Simple single drift
-          const driftEndSec = pos.driftEnd ? timecodeToSeconds(pos.driftEnd) : null
-          const modMainEnd = getMainEnd(modules[i])
-          const endPoint = driftEndSec ?? modMainEnd ?? (dur && dur !== Infinity && dur > IDLE_LOOP_DURATION ? dur - IDLE_LOOP_DURATION : null)
 
-          const linear = endPoint && endPoint > 0 ? Math.min(ct / endPoint, 1) : 0
-          const eased = linear * linear * linear
-          posStr = lerpPosition(pos.start, pos.end, eased)
+          videoPositionsRef.current[i] = posStr
+          mainRef.style.objectPosition = posStr
+          if (loopRef) loopRef.style.objectPosition = posStr
         }
-
-        videoPositionsRef.current[i] = posStr
-        ref.style.objectPosition = posStr
       }
       rafId = requestAnimationFrame(tick)
     }
     rafId = requestAnimationFrame(tick)
     return () => cancelAnimationFrame(rafId)
-  }, [isMobile, currentIndex, modules])
+  }, [isMobile, currentIndex, modules, videoState.isIdle])
 
-  // Hide button on module change, then (re-)schedule delayed show if we're in idle mode
+  // Track isIdle across renders so the layout effect on currentIndex can read
+  // the PREVIOUS module's phase. The reducer resets isIdle to false in SET_MODULE,
+  // so we can't read videoState.isIdle directly — we capture it before the change.
+  useEffect(() => {
+    prevIsIdleRef.current = videoState.isIdle
+  }, [videoState.isIdle])
+
+  // Next Chapter button visibility
   useEffect(() => {
     let t: number | undefined
     setButtonVisible(false)
-
     if (videoState.isIdle && pageState.contentPanelStage !== 'hidden') {
       t = window.setTimeout(() => setButtonVisible(true), 1000)
     }
-
-    return () => {
-      if (t) clearTimeout(t)
-    }
+    return () => { if (t) clearTimeout(t) }
   }, [currentIndex, videoState.isIdle])
 
-  // Still respond to idle mode toggles when module index remains unchanged
   useEffect(() => {
     let t: number | undefined
     if (videoState.isIdle && pageState.contentPanelStage !== 'hidden') {
@@ -215,108 +186,36 @@ export default function VideoPlayerStacked() {
     } else {
       setButtonVisible(false)
     }
-    return () => {
-      if (t) clearTimeout(t)
-    }
+    return () => { if (t) clearTimeout(t) }
   }, [videoState.isIdle])
 
-  // Show button when content panel opens (keep visible if panel closes)
   useEffect(() => {
     if (!videoState.isIdle) return
-
     let t: number | undefined
-
     if (pageState.contentPanelStage !== 'hidden') {
       t = window.setTimeout(() => setButtonVisible(true), 300)
     }
-
-    return () => {
-      if (t) clearTimeout(t)
-    }
+    return () => { if (t) clearTimeout(t) }
   }, [pageState.contentPanelStage])
 
-  // ----- Idle loop: keep video looping between mainEnd and end -----
-  useEffect(() => {
-    if (!videoState.isIdle || currentIndex < 0) return
-    const ref = videoRefs.current[currentIndex]
-    if (ref && ref.paused) {
-      ref.play().catch(() => {})
-    }
-  }, [videoState.isIdle, currentIndex])
-
-  // Track that the next module switch originated from idle (suppresses fade in useLayoutEffect)
-  const switchFromIdleRef = useRef(false)
-  // Guard against double-flush (timeUpdate + onEnded can both fire for the same boundary)
-  const flushedRef = useRef(false)
-  // Reset guard when a new module is queued
-  useEffect(() => {
-    if (videoState.queuedModuleIndex !== null) flushedRef.current = false
-  }, [videoState.queuedModuleIndex])
-
-  // Helper: perform the queued module switch at loop boundary
-  const flushQueuedModule = (source?: string) => {
-    const queuedIdx = videoState.queuedModuleIndex
-    if (queuedIdx === null || flushedRef.current) return false
-    flushedRef.current = true
-
-    const isSeq = queuedIdx === currentIndex + 1
-
-    const ref = videoRefs.current[currentIndex]
-    try { ref?.pause() } catch {}
-
-    // Only suppress fade for sequential forward jumps — non-sequential needs fade-to-black
-    switchFromIdleRef.current = isSeq
-    dispatch({ type: 'SET_MODULE', payload: queuedIdx })
-    dispatch({ type: 'PLAY' })
-    dispatch({ type: 'QUEUE_MODULE', payload: null })
-    return true
-  }
-
-  // Helper to build debug overlay data
-  const buildDebugInfo = () => {
-    const ref = videoRefs.current[currentIndex]
-    return {
-      currentIndex,
-      prevIndex: prevIndexRef.current,
-      fadePhase,
-      shouldFade,
-      isPlaying: videoState.isPlaying,
-      isIdle: videoState.isIdle,
-      mainEnd,
-      queuedModuleIndex: videoState.queuedModuleIndex,
-      videos: modules.map((m, idx) => {
-        const vref = videoRefs.current[idx]
-        return {
-          idx,
-          title: m?.title,
-          mainEnd: getMainEnd(m),
-          readyState: vref?.readyState,
-          paused: vref?.paused,
-          currentTime: vref?.currentTime?.toFixed?.(2),
-          duration: vref?.duration?.toFixed?.(2),
-        }
-      }),
-    }
-  }
-
+  // Debug overlay toggle
   useEffect(() => {
     const handleKey = (e: KeyboardEvent) => {
-      if (e.key === 'd') {
-        setShowDebug((prev) => !prev)
-      }
+      if (e.key === 'd') setShowDebug((prev) => !prev)
     }
     window.addEventListener('keydown', handleKey)
     return () => window.removeEventListener('keydown', handleKey)
   }, [])
 
-  // Detect sequential vs non-sequential navigation BEFORE paint to avoid flashes
+  // Decide transition style on currentIndex change.
+  // Rules: (main, *) -> fade. (loop, sequential next) -> instant. (loop, non-sequential) -> fade.
+  // "From intro" (prev === -1) is handled by IntroOverlay.
   useLayoutEffect(() => {
     if (currentIndex === -1) return
 
     const prev = prevIndexRef.current
     if (prev === -1) {
-      // Coming from intro — IntroOverlay handles the fade-to-black / fade-from-black transition.
-      // Just make the video layer visible at position 0, no fade, no seek.
+      // From intro — IntroOverlay handled fade-to-black if needed. Just snap state.
       prevIndexRef.current = currentIndex
       setShouldFade(false)
       isFadingRef.current = false
@@ -326,266 +225,296 @@ export default function VideoPlayerStacked() {
     }
 
     const isSequentialForward = currentIndex === prev + 1
-    const fromIdle = switchFromIdleRef.current
-    switchFromIdleRef.current = false
+    const wasInLoop = prevIsIdleRef.current
+    const instantCut = wasInLoop && isSequentialForward
 
-    if (!isSequentialForward && !fromIdle) {
-      // Non-sequential jump — fade-to-black covers the cut
-      setShouldFade(true)
-      isFadingRef.current = true
-      fadeStartedRef.current = true
-      setFadePhase('out')
-
-      dispatch({ type: 'SET_IDLE', payload: false })
-
-      // Seek new module to its mainEnd (freeze point)
-      const ref = videoRefs.current[currentIndex]
-      const modMainEnd = getMainEnd(modules[currentIndex])
-      const dur = ref?.duration
-      const effectiveMainEnd = modMainEnd ?? (dur && dur !== Infinity && dur > IDLE_LOOP_DURATION ? dur - IDLE_LOOP_DURATION : null)
-      if (ref && effectiveMainEnd !== null) {
-        try { ref.currentTime = effectiveMainEnd } catch {}
-      }
-
-      // Set position to end immediately for non-sequential jump (mobile)
-      if (isMobile) {
-        const pos = MODULE_POSITIONS[currentIndex]
-        if (pos && ref) {
-          const endPos = lerpPosition(pos.start, pos.end, 1)
-          videoPositionsRef.current[currentIndex] = endPos
-          ref.style.objectPosition = endPos
-        }
-      }
-
-      const outDuration = 300
-      const inDuration = 300
-      const inDelay = outDuration + 20
-
-      const t1 = setTimeout(() => {
-        if (effectiveMainEnd !== null) dispatch({ type: 'SET_IDLE', payload: true })
-        setFadePhase('in')
-      }, inDelay)
-
-      const t2 = setTimeout(() => {
-        setFadePhase('idle')
-      }, inDelay + inDuration)
-
-      const t3 = setTimeout(() => {
-        setShouldFade(false)
-        isFadingRef.current = false
-        fadeStartedRef.current = false
-        prevIndexRef.current = currentIndex
-      }, inDelay + inDuration + outDuration)
-
-      return () => {
-        clearTimeout(t1)
-        clearTimeout(t2)
-        clearTimeout(t3)
-      }
-    } else {
-      // Sequential navigation OR transition from idle — no fade, instant switch
+    if (instantCut) {
+      // Loop -> next sequential main: no fade, no overlay. New main plays from 0.
       setShouldFade(false)
       isFadingRef.current = false
       fadeStartedRef.current = false
-      if (videoState.isIdle) dispatch({ type: 'SET_IDLE', payload: false })
 
-      // Set position to start for sequential transition (mobile)
       if (isMobile) {
         const pos = MODULE_POSITIONS[currentIndex]
         if (pos) {
           const startPos = lerpPosition(pos.start, pos.end, 0)
           videoPositionsRef.current[currentIndex] = startPos
-          const ref = videoRefs.current[currentIndex]
-          if (ref) ref.style.objectPosition = startPos
+          const mainRef = mainRefs.current[currentIndex]
+          const loopRef = loopRefs.current[currentIndex]
+          if (mainRef) mainRef.style.objectPosition = startPos
+          if (loopRef) loopRef.style.objectPosition = startPos
         }
       }
       prevIndexRef.current = currentIndex
-      // Force a synchronous re-render before paint so opacity sees the updated prevIndexRef
       setRenderTick(c => c + 1)
+      return
+    }
+
+    // Fade-to-black: (main, *) or (loop, non-sequential)
+    setShouldFade(true)
+    isFadingRef.current = true
+    fadeStartedRef.current = true
+    setFadePhase('out')
+
+    // Ensure new module's main starts at 0 (SET_MODULE already cleared currentTime,
+    // but the <video> element itself needs the seek).
+    const newMain = mainRefs.current[currentIndex]
+    if (newMain) {
+      try { newMain.currentTime = 0 } catch {}
+    }
+
+    if (isMobile) {
+      const pos = MODULE_POSITIONS[currentIndex]
+      if (pos) {
+        const startPos = lerpPosition(pos.start, pos.end, 0)
+        videoPositionsRef.current[currentIndex] = startPos
+        if (newMain) newMain.style.objectPosition = startPos
+        const newLoop = loopRefs.current[currentIndex]
+        if (newLoop) newLoop.style.objectPosition = startPos
+      }
+    }
+
+    const outDuration = 300
+    const inDuration = 300
+    const inDelay = outDuration + 20
+
+    const t1 = setTimeout(() => setFadePhase('in'), inDelay)
+    const t2 = setTimeout(() => setFadePhase('idle'), inDelay + inDuration)
+    const t3 = setTimeout(() => {
+      setShouldFade(false)
+      isFadingRef.current = false
+      fadeStartedRef.current = false
+      prevIndexRef.current = currentIndex
+    }, inDelay + inDuration + outDuration)
+
+    return () => {
+      clearTimeout(t1)
+      clearTimeout(t2)
+      clearTimeout(t3)
     }
   }, [currentIndex])
 
-  // Ensure refs array always matches module count
+  // Defer sequential-forward cuts from idle to the loop boundary so the cut lands
+  // on the loop's last frame (authored to match the next module's frame 0).
+  // Mirrors IntroOverlay's pendingPreludeFromIntro scheduler.
+  useLayoutEffect(() => {
+    const target = videoState.pendingSequentialTarget
+    if (target === null) return
+    if (!videoState.isIdle) return
+    if (currentIndex < 0) return
+
+    const fire = () => {
+      dispatch({ type: 'SET_MODULE', payload: target })
+      dispatch({ type: 'PLAY' })
+      dispatch({ type: 'SET_PENDING_SEQUENTIAL', payload: null })
+    }
+
+    const loop = loopRefs.current[currentIndex]
+    const dur = loop?.duration
+    if (!loop || !dur || !isFinite(dur) || dur <= 0) {
+      // Loop unavailable (e.g. fallback module with no idleVideo) — cut immediately.
+      fire()
+      return
+    }
+
+    // Fire ~30ms before wrap so the visible frame is the last frame of this cycle.
+    const remainingMs = Math.max((dur - loop.currentTime) * 1000 - 30, 0)
+    const t = setTimeout(fire, remainingMs)
+    return () => clearTimeout(t)
+  }, [videoState.pendingSequentialTarget, videoState.isIdle, currentIndex, dispatch])
+
+  // Keep ref arrays sized to module count
   useEffect(() => {
     if (modules.length === 0) return
-    videoRefs.current = Array.from({ length: modules.length }, (_, i) => videoRefs.current[i] ?? null)
+    mainRefs.current = Array.from({ length: modules.length }, (_, i) => mainRefs.current[i] ?? null)
+    loopRefs.current = Array.from({ length: modules.length }, (_, i) => loopRefs.current[i] ?? null)
   }, [modules.length])
 
-  // Attach HLS streams whenever video elements or sources change
+  // Attach HLS on module list update (refs are re-attached via the ref callbacks too,
+  // but this covers initial mount and any URL changes from CMS edits)
   useEffect(() => {
     modules.forEach((m, idx) => {
-      const url = getVideoUrl(m)
-      const vid = videoRefs.current[idx]
-      if (url && vid) {
-        attachHls(vid, url)
-      }
+      const mainUrl = getMainUrl(m)
+      const loopUrl = getLoopUrl(m)
+      const main = mainRefs.current[idx]
+      const loop = loopRefs.current[idx]
+      if (mainUrl && main) attachHls(main, mainUrl)
+      if (loopUrl && loop) attachHls(loop, loopUrl)
     })
   }, [modules])
 
-  // Play / pause management when current module or playback state changes
+  // Play/pause: drive the currently visible element.
   useEffect(() => {
     if (currentIndex < 0 || currentIndex >= modules.length) return
-
     const fading = isFadingRef.current
+    const main = mainRefs.current[currentIndex]
+    const loop = loopRefs.current[currentIndex]
+    const hasLoop = !!getLoopUrl(modules[currentIndex])
 
-    const activeRef = videoRefs.current[currentIndex]
-    if (activeRef) {
-      const shouldPlay = !fading && (videoState.isPlaying || videoState.isIdle)
-      if (shouldPlay) {
-        activeRef.play().catch(() => {})
-      } else {
-        activeRef.pause()
+    if (videoState.isIdle) {
+      // Loop phase
+      if (main) try { main.pause() } catch {}
+      if (hasLoop && loop) {
+        if (!fading) {
+          loop.play().catch(() => {})
+        } else {
+          try { loop.pause() } catch {}
+        }
+      }
+      // Fallback (no loopVideo): main stays paused on its last frame, do nothing
+    } else {
+      // Main phase
+      if (loop) try { loop.pause() } catch {}
+      if (main) {
+        const shouldPlay = !fading && videoState.isPlaying
+        if (shouldPlay) {
+          main.play().catch(() => {})
+        } else {
+          try { main.pause() } catch {}
+        }
       }
     }
 
-    // Pause and rewind all non-active refs
-    videoRefs.current.forEach((ref: HTMLVideoElement | null, idx: number) => {
+    // Reset all non-current modules to clean state
+    mainRefs.current.forEach((ref, idx) => {
       if (!ref || idx === currentIndex) return
-      // During a fade, keep the previous module at its current frame for the fade-out
       if (fading && idx === prevIndexRef.current) {
-        ref.pause()
+        // Keep prev module visible during fade-out
+        try { ref.pause() } catch {}
         return
       }
-      ref.pause()
+      try { ref.pause() } catch {}
+      try { ref.currentTime = 0 } catch {}
+    })
+    loopRefs.current.forEach((ref, idx) => {
+      if (!ref || idx === currentIndex) return
+      if (fading && idx === prevIndexRef.current) {
+        try { ref.pause() } catch {}
+        return
+      }
+      try { ref.pause() } catch {}
       try { ref.currentTime = 0 } catch {}
     })
 
-    // Prime the *next* sequential video so its first frame is decoded
-    if (!fading && videoState.isPlaying) {
+    // Prime the next sequential main so its first frame is decoded for instant cut
+    if (!fading && videoState.isIdle) {
       const nextIdx = currentIndex + 1
-      const nextRef = videoRefs.current[nextIdx]
-      if (nextRef && nextRef.readyState < 2) {
-        nextRef.muted = true
-        nextRef.play()
+      const nextMain = mainRefs.current[nextIdx]
+      if (nextMain && nextMain.readyState < 2) {
+        nextMain.muted = true
+        nextMain.play()
           .then(() => {
-            nextRef.pause()
-            try { nextRef.currentTime = 0 } catch {}
+            try { nextMain.pause() } catch {}
+            try { nextMain.currentTime = 0 } catch {}
           })
           .catch(() => {})
       }
     }
-  }, [currentIndex, videoState.isPlaying, videoState.isIdle, shouldFade])
+  }, [currentIndex, videoState.isPlaying, videoState.isIdle, shouldFade, modules])
 
   // Pause previous video immediately when a non-sequential fade starts
   useLayoutEffect(() => {
     if (fadePhase === 'out') {
-      const prevRef = videoRefs.current[prevIndexRef.current]
-      if (prevRef) {
-        try { prevRef.pause() } catch {}
-      }
+      const prevIdx = prevIndexRef.current
+      const prevMain = mainRefs.current[prevIdx]
+      const prevLoop = loopRefs.current[prevIdx]
+      try { prevMain?.pause() } catch {}
+      try { prevLoop?.pause() } catch {}
     }
   }, [fadePhase])
 
-  // Sync duration and currentTime for the current main video
-  const handleLoadedMetadata = (idx: number) => {
-    const ref = videoRefs.current[idx]
+  const handleMainLoadedMetadata = (idx: number) => {
+    const ref = mainRefs.current[idx]
     if (ref && idx === currentIndex) {
-      const modMainEnd = getMainEnd(modules[idx])
-      dispatch({ type: 'SET_DURATION', payload: modMainEnd ?? ref.duration })
+      dispatch({ type: 'SET_DURATION', payload: ref.duration })
       dispatch({ type: 'SET_LOADING', payload: false })
     }
   }
 
-  const handleTimeUpdate = (idx: number) => {
+  const handleMainTimeUpdate = (idx: number) => {
     if (idx !== currentIndex) return
-    const ref = videoRefs.current[idx]
+    if (videoState.isIdle) return
+    const ref = mainRefs.current[idx]
     if (!ref) return
-
-    const ct = ref.currentTime
-    const dur = ref.duration
-
-    if (videoState.isIdle) {
-      // --- IDLE MODE: loop between mainEnd and end of video ---
-      const modMainEnd = getMainEnd(modules[idx])
-      const effectiveMainEnd = modMainEnd ?? (dur && dur !== Infinity && dur > IDLE_LOOP_DURATION ? dur - IDLE_LOOP_DURATION : null)
-      if (effectiveMainEnd !== null) {
-        const gap = dur && dur !== Infinity ? dur - ct : Infinity
-        const nearEnd = dur && dur !== Infinity && gap < 0.15 && !ref.seeking
-        if (nearEnd) {
-          if (videoState.queuedModuleIndex !== null) {
-            // Flush at the loop boundary. On Safari (native HLS) this fires with
-            // frame-accurate timing. On Chrome/Firefox (hls.js) timeupdate is coarser
-            // (~250ms) so we flush at the same nearEnd threshold (0.15s) to avoid
-            // missing the window entirely.
-            flushQueuedModule()
-            return
-          }
-
-          try {
-            if ((ref as any).fastSeek) {
-              (ref as any).fastSeek(effectiveMainEnd)
-            } else {
-              ref.currentTime = effectiveMainEnd + 0.001
-            }
-            ref.play().catch(() => {})
-          } catch {}
-        }
-      }
-      return
-    }
-
-    dispatch({ type: 'SET_TIME', payload: ct })
-
-    const modMainEnd = getMainEnd(modules[idx])
-    const effectiveMainEnd = modMainEnd ?? (dur && dur !== Infinity && dur > IDLE_LOOP_DURATION ? dur - IDLE_LOOP_DURATION : null)
-
-    if (effectiveMainEnd !== null && ct >= effectiveMainEnd - 0.1) {
-      // If a module is queued (sequential click during playback), suppress idle entry
-      // and let the video play through the idle section to its natural end.
-      // Flush near the end (same threshold as idle loop flush) so the switch happens
-      // at the last frame boundary.
-      if (videoState.queuedModuleIndex !== null) {
-        const gap = dur && dur !== Infinity ? dur - ct : Infinity
-        const nearEnd = dur && dur !== Infinity && gap < 0.15 && !ref.seeking
-        if (nearEnd) {
-          flushQueuedModule('activeNearEnd')
-        }
-        return
-      }
-      dispatch({ type: 'SET_IDLE', payload: true })
-    }
+    dispatch({ type: 'SET_TIME', payload: ref.currentTime })
   }
 
-  // Handle video ending
-  const handleEnded = (idx: number) => {
+  // Main video finished playing → enter loop phase (instant swap)
+  const handleMainEnded = (idx: number) => {
     if (idx !== currentIndex) return
-    const ref = videoRefs.current[idx]
-
-    if (videoState.isIdle && ref) {
-      // If a module is queued, switch on this exact last frame
-      if (flushQueuedModule('onEnded')) return
-
-      // Loop back to idle start
-      const modMainEnd = getMainEnd(modules[idx])
-      const dur = ref.duration
-      const effectiveMainEnd = modMainEnd ?? (dur && dur !== Infinity && dur > IDLE_LOOP_DURATION ? dur - IDLE_LOOP_DURATION : null)
-      if (effectiveMainEnd !== null) {
-        try {
-          ref.currentTime = effectiveMainEnd
-          ref.play().catch(() => {})
-        } catch {}
-      }
-    } else if (!videoState.isIdle) {
-      // If a module was queued during active playback, flush it now
-      if (flushQueuedModule('onEndedActive')) return
-      dispatch({ type: 'SET_IDLE', payload: true })
+    if (videoState.isIdle) return
+    const loop = loopRefs.current[idx]
+    if (loop) {
+      try { loop.currentTime = 0 } catch {}
+      loop.play().catch(() => {})
     }
+    dispatch({ type: 'SET_IDLE', payload: true })
   }
 
-  // Safari sometimes silently pauses HLS at boundaries
-  const handlePause = (idx: number) => {
+  // Safari sometimes silently pauses HLS — nudge back to playing
+  const handlePause = (idx: number, kind: 'main' | 'loop') => {
     if (idx !== currentIndex || isFadingRef.current) return
-    if (!videoState.isPlaying && !videoState.isIdle) return
-    const ref = videoRefs.current[idx]
+    if (kind === 'main' && (!videoState.isPlaying || videoState.isIdle)) return
+    if (kind === 'loop' && !videoState.isIdle) return
+    const ref = kind === 'main' ? mainRefs.current[idx] : loopRefs.current[idx]
     if (!ref) return
     window.requestAnimationFrame(() => {
-      if (ref && ref.paused && (videoState.isPlaying || videoState.isIdle)) {
+      const stillNeedsPlay =
+        (kind === 'main' && videoState.isPlaying && !videoState.isIdle) ||
+        (kind === 'loop' && videoState.isIdle)
+      if (ref && ref.paused && stillNeedsPlay) {
         try { ref.play().catch(() => {}) } catch {}
       }
     })
   }
 
-  // No modules yet – show placeholder
+  // Compute opacity for a given module's main or loop element.
+  const computeOpacity = (idx: number, kind: 'main' | 'loop'): number => {
+    const prevIdx = prevIndexRef.current
+    const inTransition = prevIdx !== currentIndex && !(prevIdx === -1 && currentIndex === 0)
+
+    if (shouldFade || inTransition) {
+      // During fade-out: show whichever element was visible on the previous module
+      if (fadePhase === 'out' || (inTransition && !fadeStartedRef.current)) {
+        if (idx !== prevIdx) return 0
+        // Previous module's visible element
+        const prevWasLoop = prevIsIdleRef.current
+        if (prevWasLoop) return kind === 'loop' ? 1 : 0
+        return kind === 'main' ? 1 : 0
+      }
+      // During fade-in or after fade started: show new module's main
+      if (idx !== currentIndex) return 0
+      return kind === 'main' ? 1 : 0
+    }
+
+    // Steady state (or instant cut just resolved)
+    if (idx !== currentIndex) return 0
+    if (videoState.isIdle) return kind === 'loop' ? 1 : 0
+    return kind === 'main' ? 1 : 0
+  }
+
+  const buildDebugInfo = () => {
+    return {
+      currentIndex,
+      prevIndex: prevIndexRef.current,
+      prevIsIdle: prevIsIdleRef.current,
+      fadePhase,
+      shouldFade,
+      isPlaying: videoState.isPlaying,
+      isIdle: videoState.isIdle,
+      videos: modules.map((m, idx) => {
+        const main = mainRefs.current[idx]
+        const loop = loopRefs.current[idx]
+        return {
+          idx,
+          title: m?.title,
+          main: { rs: main?.readyState, paused: main?.paused, t: main?.currentTime?.toFixed?.(2), d: main?.duration?.toFixed?.(2) },
+          loop: { rs: loop?.readyState, paused: loop?.paused, t: loop?.currentTime?.toFixed?.(2), d: loop?.duration?.toFixed?.(2), exists: !!getLoopUrl(m) },
+        }
+      }),
+    }
+  }
+
   if (modules.length === 0) {
     return <div className="relative w-full h-full bg-black" />
   }
@@ -605,72 +534,82 @@ export default function VideoPlayerStacked() {
         }}
       >
       {modules.map((module, idx) => {
-        const videoUrl = getVideoUrl(module)
-        if (!videoUrl) return null
-        return (
-          <video
-            // eslint-disable-next-line react/no-array-index-key
-            key={idx}
-            data-module-video={idx}
-            ref={(el: HTMLVideoElement | null) => {
-              videoRefs.current[idx] = el
-              if (el && videoUrl) {
-                attachHls(el, videoUrl)
-              }
-            }}
-            preload="auto"
-            muted
-            playsInline
-            crossOrigin="anonymous"
-            className="absolute top-0 left-0 w-full h-full object-cover"
-            style={{
-              opacity: (() => {
-                const prevIdx = prevIndexRef.current
-                const inTransition = prevIdx !== currentIndex
-                  && !(prevIdx === -1 && currentIndex === 0)
+        const mainUrl = getMainUrl(module)
+        if (!mainUrl) return null
+        const loopUrl = getLoopUrl(module)
+        const initialPos = isMobile
+          ? lerpPosition(
+              (MODULE_POSITIONS[idx] || MODULE_POSITIONS[0]).start,
+              (MODULE_POSITIONS[idx] || MODULE_POSITIONS[0]).start,
+              0,
+            )
+          : isContentPanelExpanded ? 'calc(50% - 90px) 50%' : '50% 50%'
 
-                if (inTransition || shouldFade) {
-                  let val: number
-                  if (fadePhase === 'out') val = idx === prevIdx ? 1 : 0
-                  else if (fadePhase === 'in') val = idx === currentIndex ? 1 : 0
-                  else if (fadeStartedRef.current) val = idx === currentIndex ? 1 : 0
-                  else val = idx === prevIdx ? 1 : 0
-                  return val
-                }
-                if (idx !== currentIndex) return 0
-                return 1
-              })(),
-              zIndex: idx + 1,
-              objectPosition: isMobile
-                ? (videoPositionsRef.current[idx] || lerpPosition(
-                    (MODULE_POSITIONS[idx] || MODULE_POSITIONS[0]).start,
-                    (MODULE_POSITIONS[idx] || MODULE_POSITIONS[0]).start,
-                    0
-                  ))
-                : isContentPanelExpanded ? 'calc(50% - 90px) 50%' : '50% 50%',
-              transition: shouldFade || fadePhase !== 'idle'
-                ? 'opacity 0.3s ease-in-out'
-                : 'none',
-            }}
-            onLoadedMetadata={() => handleLoadedMetadata(idx)}
-            onTimeUpdate={() => handleTimeUpdate(idx)}
-            onEnded={() => handleEnded(idx)}
-            onPause={() => handlePause(idx)}
-            onLoadStart={() => dispatch({ type: 'SET_LOADING', payload: true })}
-            onError={() => {
-              dispatch({ type: 'SET_LOADING', payload: false })
-            }}
-          />
+        return (
+          <Fragment key={idx}>
+            <video
+              data-module-video={idx}
+              data-role="main"
+              ref={(el: HTMLVideoElement | null) => {
+                mainRefs.current[idx] = el
+                if (el && mainUrl) attachHls(el, mainUrl)
+              }}
+              preload="auto"
+              muted
+              playsInline
+              crossOrigin="anonymous"
+              className="absolute top-0 left-0 w-full h-full object-cover"
+              style={{
+                opacity: computeOpacity(idx, 'main'),
+                zIndex: (idx + 1) * 2,
+                objectPosition: isMobile ? (videoPositionsRef.current[idx] || initialPos) : initialPos,
+                transition: shouldFade || fadePhase !== 'idle'
+                  ? 'opacity 0.3s ease-in-out'
+                  : 'none',
+              }}
+              onLoadedMetadata={() => handleMainLoadedMetadata(idx)}
+              onTimeUpdate={() => handleMainTimeUpdate(idx)}
+              onEnded={() => handleMainEnded(idx)}
+              onPause={() => handlePause(idx, 'main')}
+              onLoadStart={() => dispatch({ type: 'SET_LOADING', payload: true })}
+              onError={() => dispatch({ type: 'SET_LOADING', payload: false })}
+            />
+            {loopUrl && (
+              <video
+                data-module-video-loop={idx}
+                data-role="loop"
+                ref={(el: HTMLVideoElement | null) => {
+                  loopRefs.current[idx] = el
+                  if (el && loopUrl) attachHls(el, loopUrl)
+                }}
+                preload="auto"
+                muted
+                playsInline
+                loop
+                crossOrigin="anonymous"
+                className="absolute top-0 left-0 w-full h-full object-cover"
+                style={{
+                  opacity: computeOpacity(idx, 'loop'),
+                  zIndex: (idx + 1) * 2 + 1,
+                  objectPosition: isMobile ? (videoPositionsRef.current[idx] || initialPos) : initialPos,
+                  transition: shouldFade || fadePhase !== 'idle'
+                    ? 'opacity 0.3s ease-in-out'
+                    : 'none',
+                }}
+                onPause={() => handlePause(idx, 'loop')}
+              />
+            )}
+          </Fragment>
         )
       })}
 
-      {/* Black overlay — always in DOM so CSS transitions work */}
+      {/* Black overlay for fade-to-black transitions */}
       <div
         data-loop-overlay
         className="absolute top-0 left-0 w-full h-full bg-black"
         style={{
           opacity: shouldFade && fadePhase !== 'idle' ? 1 : 0,
-          zIndex: modules.length + 3,
+          zIndex: modules.length * 2 + 10,
           transition: 'opacity 0.3s ease-in-out',
           pointerEvents: 'none',
         }}
@@ -678,7 +617,7 @@ export default function VideoPlayerStacked() {
 
       </div>
 
-      {/* Next Chapter button (shown only during idle playback, not during intro) */}
+      {/* Next Chapter button (idle only, not during intro) */}
       {currentIndex >= 0 && currentIndex < modules.length - 1 && (
         <button
           type="button"
@@ -690,29 +629,21 @@ export default function VideoPlayerStacked() {
             if (nextModule?.slug?.current) {
               setModulePage(nextIdx, nextModule.slug.current)
             }
-            // Scroll mobile module bar to the new tab
             window.dispatchEvent(new CustomEvent('mobile-module-bar-scroll', { detail: { index: nextIdx } }))
           }}
-          className="absolute bg-black text-light font-serif font-normal text-xs tracking-wide uppercase border-light border hover:bg-light hover:text-black px-5 py-2 z-30"
+          className="absolute bg-black text-light font-serif font-normal text-xs tracking-wide uppercase border-light border hover:bg-light hover:text-black px-5 py-2 z-40"
           style={{
             left: '50%',
-            // On mobile: sit just above the module bar's resting position, then
-            // apply the same translateY the bar uses so they move in lockstep.
-            bottom: isMobile
-              ? 'calc(var(--mobile-module-bar-height, 0px) + 0.5rem)'
-              : '1rem',
+            bottom: (() => {
+              if (!isMobile) return '1rem'
+              const stage = pageState.currentPage === 'module' && !pageState.isTopMenuOpen
+                ? pageState.contentPanelStage
+                : 'hidden'
+              const panelLift = stage === 'expanded' ? '70vh' : stage === 'peek' ? '4rem' : '0px'
+              return `calc(var(--mobile-module-bar-height, 0px) + ${panelLift} + 0.5rem)`
+            })(),
             transform: (() => {
-              if (isMobile) {
-                // Mirror MobileModuleBar's translateY so button and bar animate together
-                const isMenuOpen = pageState.isTopMenuOpen
-                const isModule = pageState.currentPage === 'module'
-                let ty = '0px'
-                if (!isMenuOpen && isModule) {
-                  if (pageState.contentPanelStage === 'expanded') ty = '-70vh'
-                  else if (pageState.contentPanelStage === 'peek') ty = '-4rem'
-                }
-                return `translateX(-50%) translateY(${ty})`
-              }
+              if (isMobile) return 'translateX(-50%)'
               const sidebarOffset = 90
               const panelOffset = isContentPanelExpanded ? 192 : 0
               return `translateX(calc(-50% - ${sidebarOffset + panelOffset}px))`
@@ -720,7 +651,7 @@ export default function VideoPlayerStacked() {
             opacity: buttonVisible && !(isMobile && pageState.isTopMenuOpen) ? 1 : 0,
             transition: shouldFade
               ? 'none'
-              : `transform 500ms cubic-bezier(0.4, 0, 0.2, 1), opacity ${buttonDuration}ms cubic-bezier(0.4, 0, 0.2, 1)`,
+              : `bottom 500ms cubic-bezier(0.4, 0, 0.2, 1), transform 500ms cubic-bezier(0.4, 0, 0.2, 1), opacity ${buttonDuration}ms cubic-bezier(0.4, 0, 0.2, 1)`,
             pointerEvents: buttonVisible && !(isMobile && pageState.isTopMenuOpen) ? 'auto' : 'none',
           } as CSSProperties}
         >
@@ -728,7 +659,6 @@ export default function VideoPlayerStacked() {
         </button>
       )}
 
-      {/* Debug overlay */}
       {showDebug && (
         <pre className="absolute bottom-0 left-0 w-full max-h-60 overflow-auto bg-black/70 text-green-300 text-xs p-2 z-[9999]">
           {JSON.stringify(buildDebugInfo(), null, 2)}
