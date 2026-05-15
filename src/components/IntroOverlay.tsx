@@ -61,6 +61,28 @@ export default function IntroOverlay({ onFinish }: { onFinish: () => void }) {
 
   const [showDebug, setShowDebug] = useState(false)
 
+  // iOS Safari prime: a paused <video> with readyState=4 may still have no
+  // decoded frame in its compositor layer until .play() runs once. During the
+  // intro, module 0's main element is never primed by VideoPlayerStacked's
+  // priming pass (which gates on currentIndex >= 0). Prime it here when the
+  // intro enters loop phase so the opacity flip at cut-time reveals a real
+  // frame, not a blank layer.
+  const preludePrimedRef = useRef(false)
+  useEffect(() => {
+    if (introPhase !== 'loop') return
+    if (preludePrimedRef.current) return
+    const el = document.querySelector<HTMLVideoElement>('video[data-module-video="0"][data-role="main"]')
+    if (!el) return
+    preludePrimedRef.current = true
+    el.muted = true
+    el.play()
+      .then(() => {
+        try { el.pause() } catch {}
+        try { el.currentTime = 0 } catch {}
+      })
+      .catch(() => { preludePrimedRef.current = false })
+  }, [introPhase])
+
   // Fallback: if video never becomes ready, show button anyway after timeout
   const [fallbackReady, setFallbackReady] = useState(false)
   useEffect(() => {
@@ -170,11 +192,41 @@ export default function IntroOverlay({ onFinish }: { onFinish: () => void }) {
     try { mainRef.current?.pause() } catch {}
     try { loopRef.current?.pause() } catch {}
 
+    const preludeMain = document.querySelector('video[data-module-video="0"][data-role="main"]') as HTMLVideoElement | null
+    const loop = loopRef.current
+    console.log('[prelude-cut loop-phase]', {
+      ua: navigator.userAgent,
+      preludeReadyState: preludeMain?.readyState,
+      preludeCurrentTime: preludeMain?.currentTime,
+      preludeBuffered: preludeMain && preludeMain.buffered.length ? `${preludeMain.buffered.start(0).toFixed(3)}–${preludeMain.buffered.end(0).toFixed(3)}` : 'none',
+      preludePaused: preludeMain?.paused,
+      loopCurrentTime: loop?.currentTime,
+      loopDuration: loop?.duration,
+      tMs: performance.now().toFixed(1),
+    })
+
     dispatch({ type: 'SET_MODULE', payload: 0 })
     dispatch({ type: 'PLAY' })
 
     setInstantCut(true)
     setOverlayOpacity(0)
+
+    requestAnimationFrame(() => {
+      console.log('[prelude-cut +1raf]', {
+        preludeReadyState: preludeMain?.readyState,
+        preludeCurrentTime: preludeMain?.currentTime,
+        preludePaused: preludeMain?.paused,
+        tMs: performance.now().toFixed(1),
+      })
+    })
+    setTimeout(() => {
+      console.log('[prelude-cut +50ms]', {
+        preludeReadyState: preludeMain?.readyState,
+        preludeCurrentTime: preludeMain?.currentTime,
+        preludePaused: preludeMain?.paused,
+        tMs: performance.now().toFixed(1),
+      })
+    }, 50)
     setTimeout(onFinish, 50)
   }
 
@@ -417,8 +469,8 @@ export default function IntroOverlay({ onFinish }: { onFinish: () => void }) {
           bottom: (() => {
             if (!isMobile) return '1rem'
             const stage = pageState.contentPanelStage
-            const panelLift = stage === 'expanded' ? '70vh' : stage === 'peek' ? '4rem' : '0px'
-            return `calc(var(--mobile-module-bar-offset, 80px) + ${panelLift} + 0.5rem)`
+            const lift = stage === 'expanded' ? '70vh' : stage === 'peek' ? '4rem' : '0px'
+            return `calc(115px + ${lift} + 0.5rem)`
           })(),
           transform: (() => {
             if (isMobile) return 'translateX(-50%)'

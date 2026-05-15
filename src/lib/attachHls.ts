@@ -3,8 +3,10 @@ import Hls from 'hls.js'
 /**
  * Attaches an HLS stream to a <video> element.
  *
- * If the browser supports HLS natively (Safari, some Smart TVs) we simply set
- * the `src` directly. Otherwise we fall back to hls.js + MSE.
+ * Prefers hls.js (MSE) wherever it's supported, falling back to native HLS only
+ * on browsers without MSE (iOS Safari). hls.js gives us real adaptive bitrate
+ * and lets us force the top rendition; Chrome's "native" HLS reports
+ * canPlayType === 'maybe' but locks to a single low rendition.
  *
  * The helper also handles re-attaching when the same element is reused with a
  * different source and cleans up any previous hls.js instances stored on the
@@ -13,11 +15,13 @@ import Hls from 'hls.js'
 export default function attachHls(video: HTMLVideoElement, src: string) {
   if (!video || !src) return
 
-  const canNative =
-    video.canPlayType('application/vnd.apple.mpegurl') === 'probably' ||
-    video.canPlayType('application/vnd.apple.mpegurl') === 'maybe' ||
-    video.canPlayType('application/x-mpegURL') === 'probably' ||
-    video.canPlayType('application/x-mpegURL') === 'maybe'
+  // Prefer hls.js wherever MSE is available (Chrome, Firefox, Edge, desktop Safari).
+  // Chrome reports canPlayType('application/vnd.apple.mpegurl') === 'maybe' but its
+  // built-in HLS handler does no adaptive bitrate — it locks to one rendition (often
+  // the lowest), which is why videos rendered at 480x270 instead of the top rung.
+  // Only fall back to native HLS when hls.js is unsupported (iOS Safari), where
+  // hls.js can't use MSE anyway.
+  const hlsSupported = Hls.isSupported()
 
   // If the current attachment already matches, do nothing
   const currentSrc = (video as any)._hlsSrc ?? video.currentSrc ?? video.src
@@ -30,16 +34,7 @@ export default function attachHls(video: HTMLVideoElement, src: string) {
     delete (video as any)._hlsSrc
   }
 
-  if (canNative) {
-    // Native playback – just set the src attribute.
-    // Prefer this over hls.js whenever the browser supports HLS natively (Safari,
-    // including iOS). hls.js fetches the manifest via XHR, which fails CORS on
-    // Mux's signed rendition URLs on iOS Safari and causes a black screen.
-    video.src = src
-    return
-  }
-
-  if (Hls.isSupported()) {
+  if (hlsSupported) {
     // Use MSE via hls.js
     // First clear any src that might have been set so Chrome doesn't throw
     video.removeAttribute('src')
@@ -73,11 +68,8 @@ export default function attachHls(video: HTMLVideoElement, src: string) {
     return
   }
 
-  // As a last resort, attempt progressive MP4 fallback (will work on most browsers)
-  // Mux provides a high-quality MP4 rendition at /high.mp4
-  if (src.endsWith('.m3u8')) {
-    video.src = src.replace('.m3u8', '/high.mp4')
-  } else {
-    video.src = src
-  }
+  // No MSE available — iOS Safari path. Use native HLS by setting src directly.
+  // hls.js can't run here (no MSE), and Mux signed rendition URLs cause CORS
+  // issues when hls.js tries to XHR them on iOS anyway.
+  video.src = src
 } 

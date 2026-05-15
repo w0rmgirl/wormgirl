@@ -621,7 +621,8 @@ export default function VideoPlayerStacked() {
       {currentIndex >= 0 && currentIndex < modules.length - 1 && (
         <button
           type="button"
-          onClick={() => {
+          onClick={(e) => {
+            e.currentTarget.blur()
             setButtonVisible(false)
             const nextIdx = currentIndex + 1
             playModule(nextIdx)
@@ -631,19 +632,18 @@ export default function VideoPlayerStacked() {
             }
             window.dispatchEvent(new CustomEvent('mobile-module-bar-scroll', { detail: { index: nextIdx } }))
           }}
-          className="absolute bg-black text-light font-serif font-normal text-xs tracking-wide uppercase border-light border hover:bg-light hover:text-black px-5 py-2 z-40"
+          className="fixed bg-black text-light font-serif font-normal text-xs tracking-wide uppercase border-light border [@media(hover:hover)]:hover:bg-light [@media(hover:hover)]:hover:text-black px-5 py-2 z-40"
           style={{
             left: '50%',
-            bottom: (() => {
-              if (!isMobile) return '1rem'
-              const stage = pageState.currentPage === 'module' && !pageState.isTopMenuOpen
-                ? pageState.contentPanelStage
-                : 'hidden'
-              const panelLift = stage === 'expanded' ? '70vh' : stage === 'peek' ? '4rem' : '0px'
-              return `calc(var(--mobile-module-bar-height, 0px) + ${panelLift} + 0.5rem)`
-            })(),
+            bottom: isMobile ? 'calc(115px + 0.5rem)' : '1rem',
             transform: (() => {
-              if (isMobile) return 'translateX(-50%)'
+              if (isMobile) {
+                const stage = pageState.currentPage === 'module' && !pageState.isTopMenuOpen
+                  ? pageState.contentPanelStage
+                  : 'hidden'
+                const lift = stage === 'expanded' ? '70vh' : stage === 'peek' ? '4rem' : '0px'
+                return `translateX(-50%) translateY(calc(-1 * ${lift}))`
+              }
               const sidebarOffset = 90
               const panelOffset = isContentPanelExpanded ? 192 : 0
               return `translateX(calc(-50% - ${sidebarOffset + panelOffset}px))`
@@ -651,7 +651,7 @@ export default function VideoPlayerStacked() {
             opacity: buttonVisible && !(isMobile && pageState.isTopMenuOpen) ? 1 : 0,
             transition: shouldFade
               ? 'none'
-              : `bottom 500ms cubic-bezier(0.4, 0, 0.2, 1), transform 500ms cubic-bezier(0.4, 0, 0.2, 1), opacity ${buttonDuration}ms cubic-bezier(0.4, 0, 0.2, 1)`,
+              : `transform 500ms cubic-bezier(0.4, 0, 0.2, 1), opacity ${buttonDuration}ms cubic-bezier(0.4, 0, 0.2, 1)`,
             pointerEvents: buttonVisible && !(isMobile && pageState.isTopMenuOpen) ? 'auto' : 'none',
           } as CSSProperties}
         >

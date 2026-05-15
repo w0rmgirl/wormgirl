@@ -101,21 +101,27 @@ export default function MobileModuleBar() {
   // offset from the bottom of the viewport so other components (like the
   // Next Chapter button) can position themselves reliably.
   useLayoutEffect(() => {
+    const computeTargetLiftPx = () => {
+      // Mirrors barOffsetClass logic so the offset var reflects the bar's TARGET
+      // position immediately on state change, not after the 500ms transitionend.
+      if (pageState.isTopMenuOpen || pageState.currentPage !== 'module') return 0
+      if (pageState.contentPanelStage === 'expanded') return window.innerHeight * 0.7
+      if (pageState.contentPanelStage === 'peek') return 64 // 4rem
+      return 0
+    }
+
     const updateMetrics = () => {
       const el = barRef.current
       if (!el) return
 
-      const rect = el.getBoundingClientRect()
+      // Measure the bar's untranslated height. We can't trust getBoundingClientRect
+      // mid-transition (it reflects an in-flight transform), so compute height from
+      // offsetHeight (transform-free) and synthesize the offset from current state.
+      const height = el.offsetHeight || 80
+      document.documentElement.style.setProperty('--mobile-module-bar-height', `${height}px`)
 
-      // Height rarely changes but keep it for completeness
-      document.documentElement.style.setProperty('--mobile-module-bar-height', `${rect.height}px`)
-
-      // Distance from viewport bottom to the bar *bottom* (i.e. including any
-      // translate-Y applied via Tailwind classes).
-      // Use layout viewport height so browser chrome doesnʼt shift the calculation
-      const viewportHeight = window.innerHeight
-      const offsetFromBottom = viewportHeight - rect.top
-      document.documentElement.style.setProperty('--mobile-module-bar-offset', `${offsetFromBottom}px`)
+      const lift = computeTargetLiftPx()
+      document.documentElement.style.setProperty('--mobile-module-bar-offset', `${height + lift}px`)
     }
 
     updateMetrics()
@@ -152,7 +158,7 @@ export default function MobileModuleBar() {
         el.removeEventListener('transitionend', handleTransitionEnd)
       }
     }
-  }, [pageState.contentPanelStage, pageState.isTopMenuOpen])
+  }, [pageState.contentPanelStage, pageState.isTopMenuOpen, pageState.currentPage])
 
   return modulesState.loading ? null : (
     <div
@@ -191,7 +197,7 @@ export default function MobileModuleBar() {
               key={module._id}
               onClick={(e) => handleModuleClick(e, index, module.slug.current)}
               className={`relative group flex-shrink-0 w-44 snap-start text-left p-0 transition-colors ${
-                isActive ? 'bg-light text-dark' : 'text-light hover:bg-light hover:text-primary'
+                isActive ? 'bg-light text-dark' : 'text-light [@media(hover:hover)]:hover:bg-light [@media(hover:hover)]:hover:text-primary'
               } ${borderClasses}`}
             >
               {/* Background SVG overlay for selected state */}
@@ -211,7 +217,7 @@ export default function MobileModuleBar() {
               {/* Background SVG overlay for hover state */}
               {!isActive && module.tabImage && (
                 <div
-                  className="absolute inset-0 pointer-events-none opacity-0 transition-opacity duration-300 group-hover:opacity-100"
+                  className="absolute inset-0 pointer-events-none opacity-0 transition-opacity duration-300 [@media(hover:hover)]:group-hover:opacity-100"
                   style={{
                     WebkitMaskImage: `url(${urlFor(module.tabImage).width(400).url()})`,
                     maskImage: `url(${urlFor(module.tabImage).width(400).url()})`,
@@ -224,7 +230,7 @@ export default function MobileModuleBar() {
               <div className="flex flex-col h-full p-3 pb-6 justify-start">
                 <div
                   className={`w-7 justify-center text-xl leading-tight font-serif font-normal ${
-                    isActive ? 'text-dark' : 'text-light group-hover:text-dark'
+                    isActive ? 'text-dark' : 'text-light [@media(hover:hover)]:group-hover:text-dark'
                   }`}
                 >
                   {index === 0 ? '—' : toRomanNumeral(module.order)}
