@@ -1,6 +1,6 @@
 'use client'
 
-import { useState, useEffect, useMemo, useRef, type ReactNode } from 'react'
+import { useState, useEffect, useMemo, useRef, useCallback, type ReactNode } from 'react'
 import { PortableText, type PortableTextReactComponents } from '@portabletext/react'
 import { usePageState } from '@/context/PageStateContext'
 import { useVideo } from '@/context/VideoContext'
@@ -12,6 +12,7 @@ import { useGlossary } from '@/lib/hooks/useGlossary'
 import useIsMobile from '@/lib/hooks/useIsMobile'
 import Image from 'next/image'
 import aboutPage from '@/schemas/aboutPage'
+import ImageEnlargeModal, { type EnlargeStage } from './ImageEnlargeModal'
 
 export default function ContentPanel() {
   const { state: pageState, toggleContentPanel, isContentPanelExpanded, expandContentPanel, showPeek, setPanelMaximized } = usePageState()
@@ -54,6 +55,51 @@ export default function ContentPanel() {
 
   // Mobile cross-fade: fade out old content, swap, fade in new content
   const [mobileFade, setMobileFade] = useState<'idle' | 'fading-out' | 'fading-in'>('idle')
+
+  // Enlarge-image modal state (handlers + articleImages declared further below,
+  // after currentModule is available)
+  const [enlargedIndex, setEnlargedIndex] = useState<number | null>(null)
+  const [enlargeStage, setEnlargeStage] = useState<EnlargeStage>('closed')
+  const articleImagesRef = useRef<any[]>([])
+
+  const openEnlarge = useCallback((img: any) => {
+    const list = articleImagesRef.current
+    const idx = list.findIndex((x) => x === img || (x?._key && img?._key && x._key === img._key))
+    if (idx === -1) return
+    setEnlargedIndex(idx)
+    setEnlargeStage('opening')
+    window.setTimeout(() => setEnlargeStage('open'), 150)
+  }, [])
+
+  const navigateEnlarge = useCallback((delta: number) => {
+    setEnlargedIndex((i) => {
+      if (i == null) return i
+      const n = articleImagesRef.current.length
+      if (n === 0) return i
+      return ((i + delta) % n + n) % n
+    })
+  }, [])
+
+  const closeEnlarge = useCallback(() => {
+    setEnlargeStage((prev) => (prev === 'open' || prev === 'opening' ? 'closing-fade' : prev))
+    window.setTimeout(() => setEnlargeStage('closing-color'), 300)
+    window.setTimeout(() => {
+      setEnlargeStage('closed')
+      setEnlargedIndex(null)
+    }, 450)
+  }, [])
+
+  // Sync data-enlarge-stage attribute on the app root so globals.css drives
+  // the grayscale + opacity choreography of the underlying page.
+  useEffect(() => {
+    const root = document.getElementById('app-root')
+    if (!root) return
+    if (enlargeStage === 'closed') {
+      root.removeAttribute('data-enlarge-stage')
+    } else {
+      root.setAttribute('data-enlarge-stage', enlargeStage)
+    }
+  }, [enlargeStage])
 
   useEffect(() => {
     if (!isMobile) return
@@ -232,6 +278,16 @@ export default function ContentPanel() {
     return (effectivePageType === 'module' && currentModule?.glossary) ? currentModule.glossary : []
   }, [effectivePageType, currentModule?.glossary])
 
+  // Article body images (in document order) — drives modal prev/next navigation
+  const articleImages = useMemo<any[]>(() => {
+    if (effectivePageType !== 'module' || !currentModule?.body) return []
+    return currentModule.body.filter((b: any) => b?._type === 'image')
+  }, [effectivePageType, currentModule?._id])
+
+  useEffect(() => {
+    articleImagesRef.current = articleImages
+  }, [articleImages])
+
   // ----- Footnotes / glossary hooks -----
   // Always call these hooks with consistent parameters
   const {
@@ -392,15 +448,23 @@ export default function ContentPanel() {
         
         return (
           <div className={`mt-10 mb-16 mx-auto text-center ${isPanelExpanded ? 'max-w-[460px]' : ''}`}>
-            <img
-              src={urlFor(value).width(displayW).quality(80).url()}
-              alt={value.alt || ''}
-              className="max-w-full h-auto block mx-auto"
-              loading="lazy"
-              style={{ aspectRatio: `${origW}/${origH}`, margin: 0, padding: 0 }}
-            />
+            <button
+              type="button"
+              onClick={() => openEnlarge(value)}
+              aria-label="Enlarge image"
+              className="block mx-auto p-0 border-0 bg-transparent"
+              style={{ cursor: 'zoom-in' }}
+            >
+              <img
+                src={urlFor(value).width(displayW).quality(80).url()}
+                alt={value.alt || ''}
+                className="max-w-full h-auto block mx-auto"
+                loading="lazy"
+                style={{ aspectRatio: `${origW}/${origH}`, margin: 0, padding: 0 }}
+              />
+            </button>
             {value.caption && (
-              <p className="text-xs italic mt-2 text-light" style={{fontFamily: 'Baskervville'}}>{value.caption}</p>
+              <p className="text-xs italic mt-6 text-light text-left" style={{fontFamily: 'Baskervville'}}>{value.caption}</p>
             )}
           </div>
         )
@@ -428,7 +492,7 @@ export default function ContentPanel() {
         )
       },
     },
-  }) as Partial<PortableTextReactComponents>, [scrollToFootnote, scrollToGlossaryTerm, footnotesMap, glossaryMap, highlightedGlossaryId, highlightedFootnoteId])
+  }) as Partial<PortableTextReactComponents>, [scrollToFootnote, scrollToGlossaryTerm, footnotesMap, glossaryMap, highlightedGlossaryId, highlightedFootnoteId, openEnlarge, isPanelExpanded])
 
   // Separate components for content pages with tighter spacing and smaller text
   const contentPageTextComponents = useMemo(() => ({
@@ -524,7 +588,7 @@ export default function ContentPanel() {
               style={{ aspectRatio: `${origW}/${origH}`, margin: 0, padding: 0 }}
             />
             {value.caption && (
-              <p className="text-xs italic mt-1 text-light" style={{fontFamily: 'Baskervville'}}>{value.caption}</p>
+              <p className="text-xs italic mt-1 text-light text-left" style={{fontFamily: 'Baskervville'}}>{value.caption}</p>
             )}
           </div>
         )
@@ -1058,6 +1122,13 @@ export default function ContentPanel() {
         </div>
         </div>
       )}
+      <ImageEnlargeModal
+        images={articleImages}
+        index={enlargedIndex}
+        stage={enlargeStage}
+        onClose={closeEnlarge}
+        onNavigate={navigateEnlarge}
+      />
     </>
   )
 }

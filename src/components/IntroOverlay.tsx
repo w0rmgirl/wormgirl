@@ -474,20 +474,20 @@ export default function IntroOverlay({ onFinish }: { onFinish: () => void }) {
         className="fixed bg-black text-light font-serif font-normal text-xs tracking-wide uppercase border-light border hover:bg-light hover:text-black px-5 py-2 z-[41] w-36 text-center"
         style={{
           left: '50%',
-          bottom: (() => {
-            if (!isMobile) return '1rem'
-            const stage = pageState.contentPanelStage
-            const lift = stage === 'expanded' ? '70vh' : stage === 'peek' ? '4rem' : '0px'
-            return `calc(115px + ${lift} + 0.5rem)`
-          })(),
+          bottom: isMobile ? 'calc(115px + 0.5rem)' : '1rem',
           transform: (() => {
-            if (isMobile) return 'translateX(-50%)'
-            const sidebarOffset = 0
-            const panelOffset = isContentPanelExpanded ? 192 : 0
-            return `translateX(calc(-50% - ${sidebarOffset + panelOffset}px))`
+            if (isMobile) {
+              const stage = pageState.contentPanelStage
+              const lift = stage === 'expanded' ? '70vh' : stage === 'peek' ? '4rem' : '0px'
+              return `translateX(-50%) translateY(calc(-1 * ${lift}))`
+            }
+            const sidebarHalf = 90
+            const stage = pageState.contentPanelStage
+            const panelHalf = stage === 'expanded' ? 282 : stage === 'peek' ? 192 : 0
+            return `translateX(calc(-50% - ${sidebarHalf + panelHalf}px))`
           })(),
           opacity: buttonShouldShow ? 1 : 0,
-          transition: 'bottom 500ms cubic-bezier(0.4, 0, 0.2, 1), opacity 500ms cubic-bezier(0.4, 0, 0.2, 1)',
+          transition: 'transform 500ms cubic-bezier(0.4, 0, 0.2, 1), opacity 500ms cubic-bezier(0.4, 0, 0.2, 1)',
           pointerEvents: buttonShouldShow ? 'auto' : 'none',
         }}
       >

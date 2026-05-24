@@ -80,7 +80,7 @@ function LayoutContent({ children }: { children: React.ReactNode }) {
   // No automatic Prelude start – handled by user click
 
   return (
-    <div className="relative h-screen bg-dark overflow-hidden">
+    <div id="app-root" className="relative h-screen bg-dark overflow-hidden">
       {/* Video Player – fills viewport minus sidebar on desktop */}
       <div
         className="absolute top-0 left-0 h-full bg-black w-full"

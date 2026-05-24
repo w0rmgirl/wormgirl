@@ -48,6 +48,13 @@ export default function Sidebar() {
 
       {/* Navigation */}
       <div className="flex flex-col overflow-y-auto min-h-0 flex-1 w-full [&::-webkit-scrollbar]:hidden [-ms-overflow-style:none] [scrollbar-width:none]">
+        {/* Logo */}
+        <div className="px-2 py-3 border-b border-light">
+          <div className="flex justify-center">
+            <img src="/WORMGIRL_TEXT_LOGO_FINAL.svg" alt="Worm Girl" className="" />
+          </div>
+        </div>
+
         {/* Educational Modules */}
         <div className="p-0 flex-1">
           <div className="space-y-0">
@@ -121,15 +128,8 @@ export default function Sidebar() {
           </div>
         </div>
 
-        {/* Bottom section with logo and content pages */}
+        {/* Bottom section with content pages */}
         <div className="mt-auto">
-          {/* Logo */}
-          <div className="px-2 py-3">
-            <div className="flex justify-center">
-              <img src="/WORMGIRL_TEXT_LOGO_FINAL.svg" alt="Worm Girl" className="" />
-            </div>
-          </div>
-
           {/* Content Pages */}
           <div className="p-0 ">
             <div className="border-b border-light">
@@ -137,7 +137,7 @@ export default function Sidebar() {
                   <button
                     key={page._id}
                     onClick={() => handleContentPageClick(page.slug.current)}
-                    className={`group w-full text-left px-3 py-1.5 border-t border-light hover:bg-light hover:text-dark ${pageState.currentPage === 'content' && pageState.currentPageSlug === page.slug.current ? 'bg-light text-dark' : ''}`}
+                    className={`group w-full text-left px-3 py-1.5 border-t border-light first:border-t-0 hover:bg-light hover:text-dark ${pageState.currentPage === 'content' && pageState.currentPageSlug === page.slug.current ? 'bg-light text-dark' : ''}`}
                   >
                   <p className="font-serif font-normal text-xs tracking-wide uppercase">{page.title}</p>
                 </button>

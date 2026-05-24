@@ -142,7 +142,7 @@ export default function MobileTopMenu() {
               style={{ aspectRatio: `${origW}/${origH}`, margin: 0, padding: 0 }}
             />
             {value.caption && (
-              <p className="text-xs italic mt-2 text-light" style={{fontFamily: 'Baskervville'}}>{value.caption}</p>
+              <p className="text-xs italic mt-6 text-light text-left" style={{fontFamily: 'Baskervville'}}>{value.caption}</p>
             )}
           </div>
         )
@@ -227,7 +227,7 @@ export default function MobileTopMenu() {
               style={{ aspectRatio: `${origW}/${origH}`, margin: 0, padding: 0 }}
             />
             {value.caption && (
-              <p className="text-xs italic mt-1 text-light" style={{fontFamily: 'Baskervville'}}>{value.caption}</p>
+              <p className="text-xs italic mt-1 text-light text-left" style={{fontFamily: 'Baskervville'}}>{value.caption}</p>
             )}
           </div>
         )

@@ -208,4 +208,18 @@ html, body {
   .text-balance {
     text-wrap: balance;
   }
-} 
+}
+
+#app-root[data-enlarge-stage="opening"] {
+  filter: grayscale(1);
+  transition: filter 150ms linear;
+}
+#app-root[data-enlarge-stage="open"],
+#app-root[data-enlarge-stage="closing-fade"] {
+  filter: grayscale(1);
+  pointer-events: none;
+}
+#app-root[data-enlarge-stage="closing-color"] {
+  filter: grayscale(0);
+  transition: filter 150ms linear;
+}

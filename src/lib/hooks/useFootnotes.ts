@@ -83,7 +83,7 @@ export function useFootnotes(footnotes: any[] = [], isMobile: boolean = false) {
         const container = getScrollContainer()
         if (container) {
           const offsetTop = element.getBoundingClientRect().top - container.getBoundingClientRect().top
-          const target = container.scrollTop + offsetTop - 12
+          const target = container.scrollTop + offsetTop - 36
           const max = container.scrollHeight - container.clientHeight
           const clamped = Math.max(0, Math.min(target, max))
           
@@ -130,7 +130,7 @@ export function useFootnotes(footnotes: any[] = [], isMobile: boolean = false) {
         const container = getScrollContainer()
         if (container) {
           const offsetTop = element.getBoundingClientRect().top - container.getBoundingClientRect().top
-          const target = container.scrollTop + offsetTop - 12
+          const target = container.scrollTop + offsetTop - 36
           const max = container.scrollHeight - container.clientHeight
           const clamped = Math.max(0, Math.min(target, max))
           
